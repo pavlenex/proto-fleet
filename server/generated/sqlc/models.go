@@ -339,6 +339,7 @@ type ActivityLog struct {
 	Metadata       pqtype.NullRawMessage
 	CreatedAt      time.Time
 	BatchID        sql.NullString
+	SiteID         sql.NullInt64
 }
 
 type Agent struct {
@@ -392,6 +393,25 @@ type ApiKey struct {
 	SubjectKind    string
 }
 
+type Building struct {
+	ID                    int64
+	OrgID                 int64
+	SiteID                sql.NullInt64
+	Name                  string
+	Description           sql.NullString
+	PowerKw               sql.NullString
+	OverheadKw            sql.NullString
+	Aisles                sql.NullInt32
+	PhysicalRackCount     sql.NullInt32
+	RacksPerAisle         sql.NullInt32
+	DefaultRackRows       sql.NullInt32
+	DefaultRackColumns    sql.NullInt32
+	DefaultRackOrderIndex int16
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+	DeletedAt             sql.NullTime
+}
+
 type CommandBatchLog struct {
 	ID             int64
 	Uuid           string
@@ -418,6 +438,8 @@ type CommandOnDeviceLog struct {
 	Model             sql.NullString
 	IpAddress         sql.NullString
 	MacAddress        sql.NullString
+	OrgID             int64
+	SiteID            sql.NullInt64
 }
 
 type CurtailmentEvent struct {
@@ -505,6 +527,7 @@ type Device struct {
 	CustomName               sql.NullString
 	WorkerName               sql.NullString
 	WorkerNamePoolSyncStatus NullWorkerNamePoolSyncStatusEnum
+	SiteID                   sql.NullInt64
 }
 
 type DeviceMetric struct {
@@ -531,6 +554,7 @@ type DeviceMetric struct {
 	ChipCountKind    sql.NullString
 	ChipFrequencyMhz sql.NullFloat64
 	Health           sql.NullString
+	SiteID           sql.NullInt64
 }
 
 type DeviceMetricsDaily struct {
@@ -602,6 +626,8 @@ type DeviceSetRack struct {
 	Columns     int32
 	OrderIndex  int16
 	CoolingType int16
+	OrgID       int64
+	BuildingID  sql.NullInt64
 }
 
 type DeviceStatus struct {
@@ -695,6 +721,7 @@ type Error struct {
 	Extra             pqtype.NullRawMessage
 	CreatedAt         sql.NullTime
 	UpdatedAt         sql.NullTime
+	SiteID            sql.NullInt64
 }
 
 type MinerCredential struct {
@@ -711,6 +738,7 @@ type MinerStateSnapshot struct {
 	OrgID            int64
 	DeviceIdentifier string
 	State            int16
+	SiteID           sql.NullInt64
 }
 
 type Organization struct {
@@ -818,6 +846,21 @@ type Session struct {
 	LastActivity   time.Time
 	ExpiresAt      time.Time
 	RevokedAt      sql.NullTime
+}
+
+type Site struct {
+	ID              int64
+	OrgID           int64
+	Name            string
+	Description     sql.NullString
+	LocationCity    sql.NullString
+	LocationState   sql.NullString
+	Timezone        sql.NullString
+	PowerCapacityMw sql.NullString
+	NetworkConfig   sql.NullString
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	DeletedAt       sql.NullTime
 }
 
 type User struct {

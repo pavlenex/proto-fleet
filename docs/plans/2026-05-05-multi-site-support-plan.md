@@ -117,10 +117,10 @@ SitePicker hidden if none.
 `/settings/sites` is the admin surface for sites and buildings.
 
 **Empty state (org has zero sites).** Page renders a CTA: "Create your
-first site to organize miners by location." If the org also has
-unassigned buildings (e.g. zone-string promotion from upgrade — see
-J5), they appear in a separate section below the CTA so the operator
-can rename / edit them before assigning to a site.
+first site to organize miners by location." If the org has any
+unassigned buildings (created explicitly by the operator), they
+appear in a separate section below the CTA so the operator can
+rename / edit them before assigning to a site.
 
 **Specific site selected in topbar.** Page shows the config for that
 one site, in the section layout below.
@@ -243,39 +243,28 @@ user action**. The migration:
 - Adds new tables (`site`, `building`) but populates no rows.
 - Adds nullable `site_id` to `device`, leaving every existing miner
   with `site_id = NULL` (Unassigned).
-- Adds nullable `building_id` to `device_set_rack`. Promotes each
-  unique non-null `zone` string per org into a building row with
-  `site_id = NULL` (the building exists but is not yet assigned to a
-  site). Updates each rack's `building_id` to point at its new
-  building. Racks with `zone IS NULL` get `building_id = NULL`.
-- Leaves `device_set_rack.zone` column in place; dropped in Phase 2
-  after a writer audit confirms no callers remain.
+- Adds nullable `building_id` to `device_set_rack`. Existing racks
+  keep `building_id = NULL` and continue to surface their `zone`
+  string in the UI. Buildings are not auto-promoted from zones —
+  zone may continue to coexist with building as a free-form label,
+  and operators opt into buildings explicitly when they want
+  per-building config (capacity, layout defaults, site assignment).
+- Leaves `device_set_rack.zone` column in place; the writer audit
+  for dropping it is deferred until the building/zone coexistence
+  story is settled.
 - Blocks the upgrade deployment if any pairing or discovery job is in
   flight.
 
-**Migration banner UX.**
+No migration banner ships with this rollout. The fleet doesn't yet
+have a user base large enough to warrant a one-time educational
+prompt; an upgraded operator discovers `/settings/sites` from the
+settings nav. A coach-mark / onboarding nudge can be revisited later
+if real-world usage shows operators missing the feature.
 
-- **When:** first login after upgrade ships, for any user with
-  site-management access. Both ADMIN and SUPER_ADMIN can create
-  sites, so both see the banner.
-- **Where:** persistent banner at the top of every protoFleet page
-  until dismissed.
-- **Copy (draft):** "Multi-site support is now available. Create
-  sites to organize miners by physical location. Your existing rack
-  zones are now editable as buildings — assign them to sites once
-  you've created them." Buttons: [Manage sites] [Dismiss].
-- **Persistence:** server-side via
-  `user_organization.migration_banner_dismissed_at`. Server-side was
-  chosen over localStorage so the banner doesn't reappear in a new
-  browser, incognito window, or a different device. Each user
-  dismisses independently. Once dismissed, the banner is gone
-  forever for that user/org pair.
-
-After upgrade, an existing operator with N zones sees their org in
-site-less form: miner list shows no site column, `/settings/sites` is
-empty except for an "Unassigned buildings" section listing the N
-auto-promoted buildings. Creating a site and assigning buildings to
-it (and miners to it) is entirely opt-in.
+After upgrade, an existing operator's org is in site-less form:
+miner list shows no site column, `/settings/sites` is empty.
+Creating sites, creating buildings, and assigning miners is
+entirely opt-in.
 
 ### J6. Assigning miners / racks / buildings to sites
 
@@ -380,19 +369,14 @@ New entities and relationships introduced:
   - `power_capacity_mw` (nullable; optional)
   - `network_config` (text; newline-separated CIDRs/IPs for discovery
     scan; optional) — see "Network config validation" below.
-  - **Power contract fields** (all nullable): `iso` (enum:
-    ERCOT, PJM, MISO, CAISO, SPP, NYISO, ISO-NE, NON_ISO); when
-    `iso = NON_ISO`, `balancing_authority` (enum: TVA, SOUTHERN_CO,
-    DUKE_CAROLINAS, DUKE_PROGRESS, BPA, PACIFICORP, SRP,
-    ASSOC_ELECTRIC, OTHER); `utility_operating_company` (string);
-    `rate_type` (enum: FIXED, INDEX_LMP, PPA, TOU, TIERED, HYBRID);
+  - **Power contract fields — DEFERRED.** The eventual shape (ISO /
+    balancing-authority / rate-type enums, utility operating company,
     `rate_cents_per_kwh`, `demand_charge_cents_per_kwh`,
-    `transmission_structure` (enum: 4CP, 5CP, NONE_BUNDLED),
-    `power_factor` (`NUMERIC(4,2)` with
-    `CHECK (power_factor IN (0.85, 0.9, 0.95, 0.97, 1.0))` —
-    Postgres enums can't carry decimal values, so this is a numeric
-    column with a check constraint; UI exposes the same five values
-    as a dropdown), `contract_start_date`, `contract_end_date`.
+    `transmission_structure`, `power_factor`, contract start/end
+    dates) is captured in the design history but did NOT ship in
+    issue #195. They land in a follow-up migration once the modeling
+    is locked in; until then the column set is just location +
+    timezone + capacity + network_config.
   - Standard timestamp columns + `deleted_at` for soft delete.
 
   Cooling mode is **not** a site-level field. Miners already carry
@@ -418,11 +402,14 @@ New entities and relationships introduced:
   a soft warning, not a block. Initial suggestion list is in the
   appendix.
 
-- **`building`** — replaces today's `device_set_rack.zone` string as a
-  first-class entity. Holds:
+- **`building`** — first-class entity for per-building config
+  (capacity, layout defaults, site assignment). Coexists with the
+  free-form `device_set_rack.zone` string; operators opt into
+  buildings rather than having zones auto-promoted on upgrade.
+  Holds:
   - `site_id` (**nullable** FK; a building may exist without an
-    assigned site, e.g. zone-promoted buildings from upgrade or
-    placeholder buildings created ahead of site assignment)
+    assigned site — placeholder buildings created ahead of site
+    assignment, or buildings whose site has been deleted)
   - `name` (unique within site when site is set; unique within org
     when unassigned)
   - `power_kw` (capacity)
@@ -453,20 +440,10 @@ New entities and relationships introduced:
   with `site_id = NULL`. New pairings default to `NULL`. Operator
   assigns via bulk action.
 
-- **`device_set_rack.building_id`** — **nullable** FK. Backfilled by
-  promoting each unique non-null `zone` string per org into a
-  building row (with `site_id = NULL`), then pointing racks at their
-  building. Racks with `zone IS NULL` get `building_id = NULL`.
-
-- **`user_organization.migration_banner_dismissed_at`** — nullable
-  timestamp gating the upgrade banner. Per-user-per-org. See J5.
-  **Default value `CURRENT_TIMESTAMP` on the column definition** so
-  any `user_organization` row inserted *after* this migration is
-  born "already dismissed". Existing rows are explicitly left at
-  NULL by the migration, which is what triggers the banner — only
-  users that existed at upgrade time see it. Users newly added to
-  an upgraded org post-migration get the column default and don't
-  see the banner.
+- **`device_set_rack.building_id`** — **nullable** FK. No automatic
+  backfill from `zone` strings; operators opt into buildings
+  explicitly via the rack edit modal or bulk assign. `zone` and
+  `building_id` coexist for now.
 
 - **History-bearing tables get a nullable `site_id` column** so
   per-site filtering on Phase 2 dashboards uses the row-stamped
@@ -666,9 +643,6 @@ names land in the technical plan.
 - **Page header / app shell** — SitePicker mounted; pages read
   active site from localStorage and scope reads accordingly.
 - **Settings layout** — adds "Sites" entry to the settings nav.
-- **Migration banner** — global banner shown on first login
-  post-upgrade for any user with site-mgmt access; dismissed via
-  the new `migration_banner_dismissed_at` field.
 
 **Components / patterns reused:**
 
@@ -688,17 +662,15 @@ flag mechanism.
 
 Goal: Block ops can create 3+ sites, organize them with buildings,
 assign existing miners to sites via bulk action, see the site column
-and filter on the miner list. No topbar yet, no banner yet, no
-discovery segmentation yet. App fully functional in site-less form
-for orgs that don't opt in.
+and filter on the miner list. No topbar yet, no discovery
+segmentation yet. App fully functional in site-less form for orgs
+that don't opt in.
 
-- Migrations: `site` (with location, timezone, network config,
-  power-contract columns); `building` (with nullable `site_id` and
-  layout columns); `device.site_id` nullable; `device_set_rack.building_id`
-  nullable with zone-promotion backfill (each unique non-null zone
-  string per org becomes a building with `site_id = NULL`; racks
-  point at their building);
-  `user_organization.migration_banner_dismissed_at`.
+- Migrations: `site` (location, timezone, network config; power-
+  contract columns deferred to a follow-up); `building` (nullable
+  `site_id` + layout columns); `device.site_id` nullable;
+  `device_set_rack.building_id` nullable, no auto-backfill from
+  zones (operators opt into buildings explicitly).
 - `SiteService` proto + handlers: list (returns device + building
   counts), create, update, delete (soft, cascade-unassigns devices
   and buildings; activity log captures impact); reassign-devices.
@@ -721,10 +693,6 @@ for orgs that don't opt in.
   (`activity_log`, `miner_state_snapshots`,
   `command_on_device_log`, errors, telemetry); writers populate
   from `device.site_id` at write time. Existing rows stay NULL.
-- `user_organization.migration_banner_dismissed_at` defaults to
-  `CURRENT_TIMESTAMP` so post-migration user-org rows don't see
-  the banner; existing rows are explicitly left at NULL during
-  migration so they do.
 - `/settings/sites` page rendering empty state (zero sites) or the
   "All Sites" layout (per-site sections + unassigned buildings
   section). Inline edit modals. Site create modal with optional
@@ -747,10 +715,9 @@ assign-buildings, assign-miners workflow in <30 minutes from
 `/settings/sites` and the miner list, no engineer help. An org that
 ignores the feature continues operating site-less with no regressions.
 
-### Phase 2 — topbar, banner, site-segmented discovery
+### Phase 2 — topbar and site-segmented discovery
 
-Goal: every page is site-aware, existing orgs see a one-time
-educational prompt, pairing flow gains site segmentation.
+Goal: every page is site-aware, pairing flow gains site segmentation.
 
 - Topbar SitePicker replaces the `LocationSelector` placeholder.
   localStorage-backed active-site selection. Hidden when org has
@@ -761,7 +728,6 @@ educational prompt, pairing flow gains site segmentation.
   row-stamped `site_id` (added in Phase 1), not the device's
   *current* `site_id`. Pre-multi-site rows surface in a "(no
   site)" bucket and are excluded from specific-site filters.
-- Migration banner UI keyed off `migration_banner_dismissed_at`.
 - Discovery results segmented by site network config: each
   discovered miner is grouped under the site whose IP range caught
   it; operator can drag-and-drop between site buckets before
@@ -774,8 +740,7 @@ educational prompt, pairing flow gains site segmentation.
   Phase 1's `building_id` migration).
 - Polish: multi-select on bulk reassign, undo, batch progress.
 
-Acceptance: an existing org sees the banner exactly once and can
-dismiss it; pairing into a specific site works without a separate
+Acceptance: pairing into a specific site works without a separate
 post-pair assignment step.
 
 ### Phase 3 — site energy statistics
@@ -815,12 +780,16 @@ before they're locked.
 5. Power-contract enum coverage gaps as customers onboard — utility
    list completeness for unfamiliar regions.
 6. Whether the "Unassigned buildings" section should also offer a
-   single-click "Create site from this building" shortcut for orgs
-   migrating from the zone-string world.
+   single-click "Create site from this building" shortcut.
 7. Whether the site-create modal should also include a "Claim
    existing buildings" picker (alongside the "Assign miners"
-   picker). Useful for orgs upgrading from the zone-string world
-   who want to bundle building assignment into site creation.
+   picker), useful for operators who built up unassigned buildings
+   before creating their first site.
+8. Whether `building` and `device_set_rack.zone` will coexist
+   long-term, or whether buildings eventually subsume zones with
+   an opt-in "convert zone to building" action. Influences
+   whether the `zone` column drops at all and how the miner-list
+   filter chip evolves.
 
 ## Appendix — power contract enum suggestions
 
