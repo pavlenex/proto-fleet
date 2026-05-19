@@ -63,6 +63,7 @@ import (
 	collectionDomain "github.com/block/proto-fleet/server/internal/domain/collection"
 	commandDomain "github.com/block/proto-fleet/server/internal/domain/command"
 	curtailmentDomain "github.com/block/proto-fleet/server/internal/domain/curtailment"
+	curtailmentReconciler "github.com/block/proto-fleet/server/internal/domain/curtailment/reconciler"
 	"github.com/block/proto-fleet/server/internal/domain/deviceresolver"
 	"github.com/block/proto-fleet/server/internal/domain/diagnostics"
 	fleetmanagementDomain "github.com/block/proto-fleet/server/internal/domain/fleetmanagement"
@@ -403,6 +404,9 @@ func start(config *Config) error {
 	// only ran inline inside the schedule processor, leaving manual
 	// SetPowerTarget calls free to race a running power-target schedule.
 	commandSvc.RegisterFilter(commandDomain.NewScheduleConflictFilter(scheduleStore))
+	// CurtailmentActiveFilter blocks non-curtailment commands on locked
+	// devices; reconciler self-traffic bypasses via ActorCurtailment.
+	commandSvc.RegisterFilter(commandDomain.NewCurtailmentActiveFilter(curtailmentStore))
 
 	scheduleProcessor := scheduleDomain.NewProcessor(scheduleStore, scheduleStore, collectionStore, commandSvc, activitySvc)
 	if err := scheduleProcessor.Start(context.Background()); err != nil {
@@ -411,6 +415,16 @@ func start(config *Config) error {
 	defer func() {
 		if err := scheduleProcessor.Stop(); err != nil {
 			slog.Error("failed to stop schedule processor", "error", err)
+		}
+	}()
+
+	curtailmentRec := curtailmentReconciler.New(curtailmentReconciler.Config{}, curtailmentStore, commandSvc)
+	if err := curtailmentRec.Start(context.Background()); err != nil {
+		return fmt.Errorf("failed to start curtailment reconciler: %w", err)
+	}
+	defer func() {
+		if err := curtailmentRec.Stop(); err != nil {
+			slog.Error("failed to stop curtailment reconciler", "error", err)
 		}
 	}()
 
@@ -468,9 +482,10 @@ func start(config *Config) error {
 	mux.Handle(minercommandv1connect.NewMinerCommandServiceHandler(command.NewHandler(commandSvc), li))
 	mux.Handle(poolsv1connect.NewPoolsServiceHandler(pools.NewHandler(poolsSvc), li))
 	mux.Handle(schedulev1connect.NewScheduleServiceHandler(scheduleHandler.NewHandler(scheduleSvc), li))
-	// Curtailment v1: PreviewCurtailmentPlan is implemented; remaining
-	// RPCs return Unimplemented until follow-up work lands.
-	mux.Handle(curtailmentv1connect.NewCurtailmentServiceHandler(curtailmentHandler.NewHandler(curtailmentSvc), li))
+	// PreviewCurtailmentPlan is wired; StartCurtailment is plumbed but gated
+	// off until Stop + restorer + max_duration_seconds enforcement land;
+	// remaining RPCs return Unimplemented.
+	mux.Handle(curtailmentv1connect.NewCurtailmentServiceHandler(curtailmentHandler.NewHandler(curtailmentSvc, false), li))
 	mux.Handle(sitesv1connect.NewSiteServiceHandler(sitesHandler.NewHandler(sitesSvc), li))
 	mux.Handle(buildingsv1connect.NewBuildingServiceHandler(buildingsHandler.NewHandler(buildingsSvc), li))
 	mux.Handle(fleetnodegatewayv1connect.NewFleetNodeGatewayServiceHandler(fleetnodegateway.NewHandler(fleetNodeEnrollmentSvc, fleetNodeAuthSvc), li))

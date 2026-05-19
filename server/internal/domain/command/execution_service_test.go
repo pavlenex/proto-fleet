@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	storeMocks "github.com/block/proto-fleet/server/internal/domain/stores/interfaces/mocks"
 	"github.com/block/proto-fleet/server/internal/infrastructure/queue"
 	"github.com/block/proto-fleet/server/internal/infrastructure/queue/mocks"
+	sdk "github.com/block/proto-fleet/server/sdk/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
@@ -369,6 +371,133 @@ func TestExecuteCommandOnDevice(t *testing.T) {
 		// Assert
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "error getting miner connection info")
+	})
+
+	t.Run("Curtail dispatches with payload-derived level", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockQueue := mocks.NewMockMessageQueue(ctrl)
+		mockMinerGetter := minerMocks.NewMockCachedMinerGetter(ctrl)
+		mockMiner := minerIfaceMocks.NewMockMiner(ctrl)
+
+		payload, err := json.Marshal(dto.CurtailPayload{Level: int32(sdk.CurtailLevelFull)})
+		require.NoError(t, err)
+
+		message := queue.Message{
+			ID:          5,
+			CommandType: commandtype.Curtail,
+			DeviceID:    50,
+			Payload:     payload,
+		}
+
+		mockMinerGetter.EXPECT().GetMiner(gomock.Any(), int64(50)).Return(mockMiner, nil)
+		mockMiner.EXPECT().
+			Curtail(gomock.Any(), sdk.CurtailRequest{Level: sdk.CurtailLevelFull}).
+			Return(nil)
+
+		svc := NewExecutionService(t.Context(), &Config{
+			MaxWorkers:             5,
+			MasterPollingInterval:  10 * time.Millisecond,
+			WorkerExecutionTimeout: 5 * time.Second,
+		}, nil, mockQueue, nil, nil, mockMinerGetter, nil, nil, nil)
+
+		require.NoError(t, svc.executeCommandOnDevice(t.Context(), commandtype.Curtail, message))
+	})
+
+	t.Run("Curtail surfaces unmarshal failure", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockQueue := mocks.NewMockMessageQueue(ctrl)
+		mockMinerGetter := minerMocks.NewMockCachedMinerGetter(ctrl)
+		mockMiner := minerIfaceMocks.NewMockMiner(ctrl)
+
+		message := queue.Message{
+			ID:          6,
+			CommandType: commandtype.Curtail,
+			DeviceID:    51,
+			Payload:     []byte("not-json"),
+		}
+
+		mockMinerGetter.EXPECT().GetMiner(gomock.Any(), int64(51)).Return(mockMiner, nil)
+		// Curtail must NOT be called when payload unmarshal fails.
+
+		svc := NewExecutionService(t.Context(), &Config{
+			MaxWorkers:             5,
+			MasterPollingInterval:  10 * time.Millisecond,
+			WorkerExecutionTimeout: 5 * time.Second,
+		}, nil, mockQueue, nil, nil, mockMinerGetter, nil, nil, nil)
+
+		err := svc.executeCommandOnDevice(t.Context(), commandtype.Curtail, message)
+		require.Error(t, err)
+		assert.True(t, fleeterror.IsFailedPreconditionError(err), "expected FailedPrecondition, got %v", err)
+		assert.Contains(t, err.Error(), "unmarshalling curtail payload")
+	})
+
+	// Both bounds of the level range — covers a `>` -> `>=` mutation on the
+	// upper arm and a `<` -> `<=` mutation on the lower arm.
+	for _, level := range []int32{0, 3} {
+		t.Run(fmt.Sprintf("Curtail rejects out-of-range level=%d as FailedPrecondition", level), func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockQueue := mocks.NewMockMessageQueue(ctrl)
+			mockMinerGetter := minerMocks.NewMockCachedMinerGetter(ctrl)
+			mockMiner := minerIfaceMocks.NewMockMiner(ctrl)
+
+			payload, err := json.Marshal(dto.CurtailPayload{Level: level})
+			require.NoError(t, err)
+
+			message := queue.Message{
+				ID:          8,
+				CommandType: commandtype.Curtail,
+				DeviceID:    53,
+				Payload:     payload,
+			}
+
+			mockMinerGetter.EXPECT().GetMiner(gomock.Any(), int64(53)).Return(mockMiner, nil)
+			// No mockMiner.EXPECT().Curtail(...) — bounds check must short-circuit.
+
+			svc := NewExecutionService(t.Context(), &Config{
+				MaxWorkers:             5,
+				MasterPollingInterval:  10 * time.Millisecond,
+				WorkerExecutionTimeout: 5 * time.Second,
+			}, nil, mockQueue, nil, nil, mockMinerGetter, nil, nil, nil)
+
+			err = svc.executeCommandOnDevice(t.Context(), commandtype.Curtail, message)
+			require.Error(t, err)
+			assert.True(t, fleeterror.IsFailedPreconditionError(err), "expected FailedPrecondition, got %v", err)
+			assert.Contains(t, err.Error(), "invalid curtail level")
+		})
+	}
+
+	t.Run("Uncurtail dispatches with empty request", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockQueue := mocks.NewMockMessageQueue(ctrl)
+		mockMinerGetter := minerMocks.NewMockCachedMinerGetter(ctrl)
+		mockMiner := minerIfaceMocks.NewMockMiner(ctrl)
+
+		message := queue.Message{
+			ID:          7,
+			CommandType: commandtype.Uncurtail,
+			DeviceID:    52,
+		}
+
+		mockMinerGetter.EXPECT().GetMiner(gomock.Any(), int64(52)).Return(mockMiner, nil)
+		mockMiner.EXPECT().
+			Uncurtail(gomock.Any(), sdk.UncurtailRequest{}).
+			Return(nil)
+
+		svc := NewExecutionService(t.Context(), &Config{
+			MaxWorkers:             5,
+			MasterPollingInterval:  10 * time.Millisecond,
+			WorkerExecutionTimeout: 5 * time.Second,
+		}, nil, mockQueue, nil, nil, mockMinerGetter, nil, nil, nil)
+
+		require.NoError(t, svc.executeCommandOnDevice(t.Context(), commandtype.Uncurtail, message))
 	})
 }
 

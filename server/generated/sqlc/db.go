@@ -552,6 +552,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listMinerStateSnapshotsStmt, err = db.PrepareContext(ctx, listMinerStateSnapshots); err != nil {
 		return nil, fmt.Errorf("error preparing query ListMinerStateSnapshots: %w", err)
 	}
+	if q.listNonTerminalCurtailmentEventsStmt, err = db.PrepareContext(ctx, listNonTerminalCurtailmentEvents); err != nil {
+		return nil, fmt.Errorf("error preparing query ListNonTerminalCurtailmentEvents: %w", err)
+	}
 	if q.listOrganizationsStmt, err = db.PrepareContext(ctx, listOrganizations); err != nil {
 		return nil, fmt.Errorf("error preparing query ListOrganizations: %w", err)
 	}
@@ -768,6 +771,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.updateBuildingStmt, err = db.PrepareContext(ctx, updateBuilding); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateBuilding: %w", err)
 	}
+	if q.updateCurtailmentEventStateStmt, err = db.PrepareContext(ctx, updateCurtailmentEventState); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateCurtailmentEventState: %w", err)
+	}
+	if q.updateCurtailmentTargetStateStmt, err = db.PrepareContext(ctx, updateCurtailmentTargetState); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateCurtailmentTargetState: %w", err)
+	}
 	if q.updateDeviceIPAssignmentStmt, err = db.PrepareContext(ctx, updateDeviceIPAssignment); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateDeviceIPAssignment: %w", err)
 	}
@@ -857,6 +866,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.upsertCommandOnDeviceLogStmt, err = db.PrepareContext(ctx, upsertCommandOnDeviceLog); err != nil {
 		return nil, fmt.Errorf("error preparing query UpsertCommandOnDeviceLog: %w", err)
+	}
+	if q.upsertCurtailmentReconcilerHeartbeatStmt, err = db.PrepareContext(ctx, upsertCurtailmentReconcilerHeartbeat); err != nil {
+		return nil, fmt.Errorf("error preparing query UpsertCurtailmentReconcilerHeartbeat: %w", err)
 	}
 	if q.upsertDevicePairingStmt, err = db.PrepareContext(ctx, upsertDevicePairing); err != nil {
 		return nil, fmt.Errorf("error preparing query UpsertDevicePairing: %w", err)
@@ -1764,6 +1776,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listMinerStateSnapshotsStmt: %w", cerr)
 		}
 	}
+	if q.listNonTerminalCurtailmentEventsStmt != nil {
+		if cerr := q.listNonTerminalCurtailmentEventsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listNonTerminalCurtailmentEventsStmt: %w", cerr)
+		}
+	}
 	if q.listOrganizationsStmt != nil {
 		if cerr := q.listOrganizationsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listOrganizationsStmt: %w", cerr)
@@ -2124,6 +2141,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing updateBuildingStmt: %w", cerr)
 		}
 	}
+	if q.updateCurtailmentEventStateStmt != nil {
+		if cerr := q.updateCurtailmentEventStateStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateCurtailmentEventStateStmt: %w", cerr)
+		}
+	}
+	if q.updateCurtailmentTargetStateStmt != nil {
+		if cerr := q.updateCurtailmentTargetStateStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateCurtailmentTargetStateStmt: %w", cerr)
+		}
+	}
 	if q.updateDeviceIPAssignmentStmt != nil {
 		if cerr := q.updateDeviceIPAssignmentStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateDeviceIPAssignmentStmt: %w", cerr)
@@ -2272,6 +2299,11 @@ func (q *Queries) Close() error {
 	if q.upsertCommandOnDeviceLogStmt != nil {
 		if cerr := q.upsertCommandOnDeviceLogStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing upsertCommandOnDeviceLogStmt: %w", cerr)
+		}
+	}
+	if q.upsertCurtailmentReconcilerHeartbeatStmt != nil {
+		if cerr := q.upsertCurtailmentReconcilerHeartbeatStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing upsertCurtailmentReconcilerHeartbeatStmt: %w", cerr)
 		}
 	}
 	if q.upsertDevicePairingStmt != nil {
@@ -2524,6 +2556,7 @@ type Queries struct {
 	listExistingDeviceIdentifiersStmt                   *sql.Stmt
 	listFleetNodesForOrganizationStmt                   *sql.Stmt
 	listMinerStateSnapshotsStmt                         *sql.Stmt
+	listNonTerminalCurtailmentEventsStmt                *sql.Stmt
 	listOrganizationsStmt                               *sql.Stmt
 	listPoolsStmt                                       *sql.Stmt
 	listRackTypesStmt                                   *sql.Stmt
@@ -2596,6 +2629,8 @@ type Queries struct {
 	undeleteRoleStmt                                    *sql.Stmt
 	updateApiKeyLastUsedStmt                            *sql.Stmt
 	updateBuildingStmt                                  *sql.Stmt
+	updateCurtailmentEventStateStmt                     *sql.Stmt
+	updateCurtailmentTargetStateStmt                    *sql.Stmt
 	updateDeviceIPAssignmentStmt                        *sql.Stmt
 	updateDeviceInfoStmt                                *sql.Stmt
 	updateDevicePairingStatusByIdentifierStmt           *sql.Stmt
@@ -2626,6 +2661,7 @@ type Queries struct {
 	updateUserRoleStmt                                  *sql.Stmt
 	updateUserUsernameStmt                              *sql.Stmt
 	upsertCommandOnDeviceLogStmt                        *sql.Stmt
+	upsertCurtailmentReconcilerHeartbeatStmt            *sql.Stmt
 	upsertDevicePairingStmt                             *sql.Stmt
 	upsertDeviceStatusStmt                              *sql.Stmt
 	upsertDiscoveredDeviceStmt                          *sql.Stmt
@@ -2815,6 +2851,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listExistingDeviceIdentifiersStmt:                   q.listExistingDeviceIdentifiersStmt,
 		listFleetNodesForOrganizationStmt:                   q.listFleetNodesForOrganizationStmt,
 		listMinerStateSnapshotsStmt:                         q.listMinerStateSnapshotsStmt,
+		listNonTerminalCurtailmentEventsStmt:                q.listNonTerminalCurtailmentEventsStmt,
 		listOrganizationsStmt:                               q.listOrganizationsStmt,
 		listPoolsStmt:                                       q.listPoolsStmt,
 		listRackTypesStmt:                                   q.listRackTypesStmt,
@@ -2887,6 +2924,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		undeleteRoleStmt:                                    q.undeleteRoleStmt,
 		updateApiKeyLastUsedStmt:                            q.updateApiKeyLastUsedStmt,
 		updateBuildingStmt:                                  q.updateBuildingStmt,
+		updateCurtailmentEventStateStmt:                     q.updateCurtailmentEventStateStmt,
+		updateCurtailmentTargetStateStmt:                    q.updateCurtailmentTargetStateStmt,
 		updateDeviceIPAssignmentStmt:                        q.updateDeviceIPAssignmentStmt,
 		updateDeviceInfoStmt:                                q.updateDeviceInfoStmt,
 		updateDevicePairingStatusByIdentifierStmt:           q.updateDevicePairingStatusByIdentifierStmt,
@@ -2917,6 +2956,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		updateUserRoleStmt:                                  q.updateUserRoleStmt,
 		updateUserUsernameStmt:                              q.updateUserUsernameStmt,
 		upsertCommandOnDeviceLogStmt:                        q.upsertCommandOnDeviceLogStmt,
+		upsertCurtailmentReconcilerHeartbeatStmt:            q.upsertCurtailmentReconcilerHeartbeatStmt,
 		upsertDevicePairingStmt:                             q.upsertDevicePairingStmt,
 		upsertDeviceStatusStmt:                              q.upsertDeviceStatusStmt,
 		upsertDiscoveredDeviceStmt:                          q.upsertDiscoveredDeviceStmt,
