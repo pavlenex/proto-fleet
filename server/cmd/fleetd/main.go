@@ -148,6 +148,7 @@ var reflectEnabledServices = []string{
 	fleetnodegatewayv1connect.FleetNodeGatewayServiceName,
 	sitesv1connect.SiteServiceName,
 	buildingsv1connect.BuildingServiceName,
+	curtailmentv1connect.CurtailmentServiceName,
 }
 
 func start(config *Config) error {
@@ -426,7 +427,14 @@ func start(config *Config) error {
 	scheduleSvc := scheduleDomain.NewService(scheduleStore, scheduleStore, scheduleStore, transactor, activitySvc)
 
 	curtailmentStore := sqlstores.NewSQLCurtailmentStore(conn)
-	curtailmentSvc := curtailmentDomain.NewService(curtailmentStore)
+	// Curtailment operational metrics route through this single recorder.
+	// Swap NoOpMetrics for the platform observability implementation once
+	// the pipeline shape lands (OTel Meter, Prometheus, or DogStatsD).
+	var curtailmentMetrics curtailmentDomain.Metrics = curtailmentDomain.NoOpMetrics{}
+	curtailmentSvc := curtailmentDomain.NewService(curtailmentStore,
+		curtailmentDomain.WithServiceMetrics(curtailmentMetrics),
+		curtailmentDomain.WithAuditLogger(activitySvc),
+	)
 
 	sitesSvc := sitesDomain.NewService(siteStore, transactor, activitySvc)
 	buildingsSvc := buildingsDomain.NewService(buildingStore, siteStore, transactor, activitySvc)
@@ -451,7 +459,7 @@ func start(config *Config) error {
 		}
 	}()
 
-	curtailmentRec := curtailmentReconciler.New(curtailmentReconciler.Config{}, curtailmentStore, commandSvc)
+	curtailmentRec := curtailmentReconciler.New(curtailmentReconciler.Config{}, curtailmentStore, commandSvc, curtailmentReconciler.WithMetrics(curtailmentMetrics))
 	if err := curtailmentRec.Start(context.Background()); err != nil {
 		return fmt.Errorf("failed to start curtailment reconciler: %w", err)
 	}
@@ -515,10 +523,6 @@ func start(config *Config) error {
 	mux.Handle(minercommandv1connect.NewMinerCommandServiceHandler(command.NewHandler(commandSvc), li))
 	mux.Handle(poolsv1connect.NewPoolsServiceHandler(pools.NewHandler(poolsSvc), li))
 	mux.Handle(schedulev1connect.NewScheduleServiceHandler(scheduleHandler.NewHandler(scheduleSvc), li))
-	// Preview, Start, Stop, and GetActive are wired; reconciler drives
-	// non-terminal events to terminal (including max_duration_seconds-based
-	// forced restore). UpdateCurtailmentEvent and ListCurtailmentEvents return
-	// Unimplemented pending the read APIs ticket.
 	mux.Handle(curtailmentv1connect.NewCurtailmentServiceHandler(curtailmentHandler.NewHandler(curtailmentSvc), li))
 	mux.Handle(sitesv1connect.NewSiteServiceHandler(sitesHandler.NewHandler(sitesSvc), li))
 	mux.Handle(buildingsv1connect.NewBuildingServiceHandler(buildingsHandler.NewHandler(buildingsSvc), li))

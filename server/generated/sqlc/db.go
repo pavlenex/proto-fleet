@@ -33,6 +33,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.adminResetUserPasswordStmt, err = db.PrepareContext(ctx, adminResetUserPassword); err != nil {
 		return nil, fmt.Errorf("error preparing query AdminResetUserPassword: %w", err)
 	}
+	if q.adminTerminateCurtailmentEventStmt, err = db.PrepareContext(ctx, adminTerminateCurtailmentEvent); err != nil {
+		return nil, fmt.Errorf("error preparing query AdminTerminateCurtailmentEvent: %w", err)
+	}
 	if q.allDevicesBelongToOrgStmt, err = db.PrepareContext(ctx, allDevicesBelongToOrg); err != nil {
 		return nil, fmt.Errorf("error preparing query AllDevicesBelongToOrg: %w", err)
 	}
@@ -56,6 +59,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.buildingsByIDsStmt, err = db.PrepareContext(ctx, buildingsByIDs); err != nil {
 		return nil, fmt.Errorf("error preparing query BuildingsByIDs: %w", err)
+	}
+	if q.bulkInsertCurtailmentTargetsStmt, err = db.PrepareContext(ctx, bulkInsertCurtailmentTargets); err != nil {
+		return nil, fmt.Errorf("error preparing query BulkInsertCurtailmentTargets: %w", err)
+	}
+	if q.bumpCurtailmentTargetRetryStmt, err = db.PrepareContext(ctx, bumpCurtailmentTargetRetry); err != nil {
+		return nil, fmt.Errorf("error preparing query BumpCurtailmentTargetRetry: %w", err)
 	}
 	if q.cancelEnrollmentForFleetNodeStmt, err = db.PrepareContext(ctx, cancelEnrollmentForFleetNode); err != nil {
 		return nil, fmt.Errorf("error preparing query CancelEnrollmentForFleetNode: %w", err)
@@ -168,6 +177,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.createUserOrganizationStmt, err = db.PrepareContext(ctx, createUserOrganization); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateUserOrganization: %w", err)
 	}
+	if q.curtailmentEventHasInFlightTargetsStmt, err = db.PrepareContext(ctx, curtailmentEventHasInFlightTargets); err != nil {
+		return nil, fmt.Errorf("error preparing query CurtailmentEventHasInFlightTargets: %w", err)
+	}
 	if q.deleteExpiredSessionsStmt, err = db.PrepareContext(ctx, deleteExpiredSessions); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteExpiredSessions: %w", err)
 	}
@@ -251,6 +263,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getBuiltinRoleForOrgStmt, err = db.PrepareContext(ctx, getBuiltinRoleForOrg); err != nil {
 		return nil, fmt.Errorf("error preparing query GetBuiltinRoleForOrg: %w", err)
+	}
+	if q.getCurtailmentEventByExternalReferenceStmt, err = db.PrepareContext(ctx, getCurtailmentEventByExternalReference); err != nil {
+		return nil, fmt.Errorf("error preparing query GetCurtailmentEventByExternalReference: %w", err)
+	}
+	if q.getCurtailmentEventByIdempotencyKeyStmt, err = db.PrepareContext(ctx, getCurtailmentEventByIdempotencyKey); err != nil {
+		return nil, fmt.Errorf("error preparing query GetCurtailmentEventByIdempotencyKey: %w", err)
 	}
 	if q.getCurtailmentEventByUUIDStmt, err = db.PrepareContext(ctx, getCurtailmentEventByUUID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetCurtailmentEventByUUID: %w", err)
@@ -537,9 +555,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertCurtailmentEventStmt, err = db.PrepareContext(ctx, insertCurtailmentEvent); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertCurtailmentEvent: %w", err)
 	}
-	if q.insertCurtailmentTargetStmt, err = db.PrepareContext(ctx, insertCurtailmentTarget); err != nil {
-		return nil, fmt.Errorf("error preparing query InsertCurtailmentTarget: %w", err)
-	}
 	if q.insertDeviceStmt, err = db.PrepareContext(ctx, insertDevice); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertDevice: %w", err)
 	}
@@ -587,6 +602,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listCurtailmentCandidatesByOrgStmt, err = db.PrepareContext(ctx, listCurtailmentCandidatesByOrg); err != nil {
 		return nil, fmt.Errorf("error preparing query ListCurtailmentCandidatesByOrg: %w", err)
+	}
+	if q.listCurtailmentEventsForOrgStmt, err = db.PrepareContext(ctx, listCurtailmentEventsForOrg); err != nil {
+		return nil, fmt.Errorf("error preparing query ListCurtailmentEventsForOrg: %w", err)
 	}
 	if q.listCurtailmentTargetsByEventStmt, err = db.PrepareContext(ctx, listCurtailmentTargetsByEvent); err != nil {
 		return nil, fmt.Errorf("error preparing query ListCurtailmentTargetsByEvent: %w", err)
@@ -816,6 +834,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.softDeleteUserFromOrganizationStmt, err = db.PrepareContext(ctx, softDeleteUserFromOrganization); err != nil {
 		return nil, fmt.Errorf("error preparing query SoftDeleteUserFromOrganization: %w", err)
 	}
+	if q.sweepCurtailmentTargetsToRestoreFailedStmt, err = db.PrepareContext(ctx, sweepCurtailmentTargetsToRestoreFailed); err != nil {
+		return nil, fmt.Errorf("error preparing query SweepCurtailmentTargetsToRestoreFailed: %w", err)
+	}
 	if q.sweepExpiredEnrollmentsStmt, err = db.PrepareContext(ctx, sweepExpiredEnrollments); err != nil {
 		return nil, fmt.Errorf("error preparing query SweepExpiredEnrollments: %w", err)
 	}
@@ -854,6 +875,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.updateBuildingStmt, err = db.PrepareContext(ctx, updateBuilding); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateBuilding: %w", err)
+	}
+	if q.updateCurtailmentEventOperatorFieldsStmt, err = db.PrepareContext(ctx, updateCurtailmentEventOperatorFields); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateCurtailmentEventOperatorFields: %w", err)
 	}
 	if q.updateCurtailmentEventStateStmt, err = db.PrepareContext(ctx, updateCurtailmentEventState); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateCurtailmentEventState: %w", err)
@@ -1004,6 +1028,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing adminResetUserPasswordStmt: %w", cerr)
 		}
 	}
+	if q.adminTerminateCurtailmentEventStmt != nil {
+		if cerr := q.adminTerminateCurtailmentEventStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing adminTerminateCurtailmentEventStmt: %w", cerr)
+		}
+	}
 	if q.allDevicesBelongToOrgStmt != nil {
 		if cerr := q.allDevicesBelongToOrgStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing allDevicesBelongToOrgStmt: %w", cerr)
@@ -1042,6 +1071,16 @@ func (q *Queries) Close() error {
 	if q.buildingsByIDsStmt != nil {
 		if cerr := q.buildingsByIDsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing buildingsByIDsStmt: %w", cerr)
+		}
+	}
+	if q.bulkInsertCurtailmentTargetsStmt != nil {
+		if cerr := q.bulkInsertCurtailmentTargetsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing bulkInsertCurtailmentTargetsStmt: %w", cerr)
+		}
+	}
+	if q.bumpCurtailmentTargetRetryStmt != nil {
+		if cerr := q.bumpCurtailmentTargetRetryStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing bumpCurtailmentTargetRetryStmt: %w", cerr)
 		}
 	}
 	if q.cancelEnrollmentForFleetNodeStmt != nil {
@@ -1229,6 +1268,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing createUserOrganizationStmt: %w", cerr)
 		}
 	}
+	if q.curtailmentEventHasInFlightTargetsStmt != nil {
+		if cerr := q.curtailmentEventHasInFlightTargetsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing curtailmentEventHasInFlightTargetsStmt: %w", cerr)
+		}
+	}
 	if q.deleteExpiredSessionsStmt != nil {
 		if cerr := q.deleteExpiredSessionsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteExpiredSessionsStmt: %w", cerr)
@@ -1367,6 +1411,16 @@ func (q *Queries) Close() error {
 	if q.getBuiltinRoleForOrgStmt != nil {
 		if cerr := q.getBuiltinRoleForOrgStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getBuiltinRoleForOrgStmt: %w", cerr)
+		}
+	}
+	if q.getCurtailmentEventByExternalReferenceStmt != nil {
+		if cerr := q.getCurtailmentEventByExternalReferenceStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getCurtailmentEventByExternalReferenceStmt: %w", cerr)
+		}
+	}
+	if q.getCurtailmentEventByIdempotencyKeyStmt != nil {
+		if cerr := q.getCurtailmentEventByIdempotencyKeyStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getCurtailmentEventByIdempotencyKeyStmt: %w", cerr)
 		}
 	}
 	if q.getCurtailmentEventByUUIDStmt != nil {
@@ -1844,11 +1898,6 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertCurtailmentEventStmt: %w", cerr)
 		}
 	}
-	if q.insertCurtailmentTargetStmt != nil {
-		if cerr := q.insertCurtailmentTargetStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing insertCurtailmentTargetStmt: %w", cerr)
-		}
-	}
 	if q.insertDeviceStmt != nil {
 		if cerr := q.insertDeviceStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertDeviceStmt: %w", cerr)
@@ -1927,6 +1976,11 @@ func (q *Queries) Close() error {
 	if q.listCurtailmentCandidatesByOrgStmt != nil {
 		if cerr := q.listCurtailmentCandidatesByOrgStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listCurtailmentCandidatesByOrgStmt: %w", cerr)
+		}
+	}
+	if q.listCurtailmentEventsForOrgStmt != nil {
+		if cerr := q.listCurtailmentEventsForOrgStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listCurtailmentEventsForOrgStmt: %w", cerr)
 		}
 	}
 	if q.listCurtailmentTargetsByEventStmt != nil {
@@ -2309,6 +2363,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing softDeleteUserFromOrganizationStmt: %w", cerr)
 		}
 	}
+	if q.sweepCurtailmentTargetsToRestoreFailedStmt != nil {
+		if cerr := q.sweepCurtailmentTargetsToRestoreFailedStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing sweepCurtailmentTargetsToRestoreFailedStmt: %w", cerr)
+		}
+	}
 	if q.sweepExpiredEnrollmentsStmt != nil {
 		if cerr := q.sweepExpiredEnrollmentsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing sweepExpiredEnrollmentsStmt: %w", cerr)
@@ -2372,6 +2431,11 @@ func (q *Queries) Close() error {
 	if q.updateBuildingStmt != nil {
 		if cerr := q.updateBuildingStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateBuildingStmt: %w", cerr)
+		}
+	}
+	if q.updateCurtailmentEventOperatorFieldsStmt != nil {
+		if cerr := q.updateCurtailmentEventOperatorFieldsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateCurtailmentEventOperatorFieldsStmt: %w", cerr)
 		}
 	}
 	if q.updateCurtailmentEventStateStmt != nil {
@@ -2631,6 +2695,7 @@ type Queries struct {
 	acquireReconcileLockStmt                            *sql.Stmt
 	addDevicesToDeviceSetStmt                           *sql.Stmt
 	adminResetUserPasswordStmt                          *sql.Stmt
+	adminTerminateCurtailmentEventStmt                  *sql.Stmt
 	allDevicesBelongToOrgStmt                           *sql.Stmt
 	assignBuildingToSiteStmt                            *sql.Stmt
 	assignPermissionToRoleStmt                          *sql.Stmt
@@ -2639,6 +2704,8 @@ type Queries struct {
 	bindEnrollmentToFleetNodeStmt                       *sql.Stmt
 	buildingBelongsToOrgStmt                            *sql.Stmt
 	buildingsByIDsStmt                                  *sql.Stmt
+	bulkInsertCurtailmentTargetsStmt                    *sql.Stmt
+	bumpCurtailmentTargetRetryStmt                      *sql.Stmt
 	cancelEnrollmentForFleetNodeStmt                    *sql.Stmt
 	cancelPendingEnrollmentStmt                         *sql.Stmt
 	cascadeAddedDeviceSitesStmt                         *sql.Stmt
@@ -2676,6 +2743,7 @@ type Queries struct {
 	createSiteStmt                                      *sql.Stmt
 	createUserStmt                                      *sql.Stmt
 	createUserOrganizationStmt                          *sql.Stmt
+	curtailmentEventHasInFlightTargetsStmt              *sql.Stmt
 	deleteExpiredSessionsStmt                           *sql.Stmt
 	deleteOrganizationStmt                              *sql.Stmt
 	deletePoolStmt                                      *sql.Stmt
@@ -2704,6 +2772,8 @@ type Queries struct {
 	getBuildingStmt                                     *sql.Stmt
 	getBuildingSiteStmt                                 *sql.Stmt
 	getBuiltinRoleForOrgStmt                            *sql.Stmt
+	getCurtailmentEventByExternalReferenceStmt          *sql.Stmt
+	getCurtailmentEventByIdempotencyKeyStmt             *sql.Stmt
 	getCurtailmentEventByUUIDStmt                       *sql.Stmt
 	getCurtailmentOrgConfigStmt                         *sql.Stmt
 	getCurtailmentReconcilerHeartbeatStmt               *sql.Stmt
@@ -2799,7 +2869,6 @@ type Queries struct {
 	hasUserStmt                                         *sql.Stmt
 	insertActivityLogStmt                               *sql.Stmt
 	insertCurtailmentEventStmt                          *sql.Stmt
-	insertCurtailmentTargetStmt                         *sql.Stmt
 	insertDeviceStmt                                    *sql.Stmt
 	insertDeviceMetricsStmt                             *sql.Stmt
 	insertErrorStmt                                     *sql.Stmt
@@ -2816,6 +2885,7 @@ type Queries struct {
 	listBuildingsByOrgStmt                              *sql.Stmt
 	listBuiltinRolesForOrgStmt                          *sql.Stmt
 	listCurtailmentCandidatesByOrgStmt                  *sql.Stmt
+	listCurtailmentEventsForOrgStmt                     *sql.Stmt
 	listCurtailmentTargetsByEventStmt                   *sql.Stmt
 	listCustomRolesForOrgStmt                           *sql.Stmt
 	listDeviceSetMembersPaginatedStmt                   *sql.Stmt
@@ -2892,6 +2962,7 @@ type Queries struct {
 	softDeleteSiteStmt                                  *sql.Stmt
 	softDeleteUserStmt                                  *sql.Stmt
 	softDeleteUserFromOrganizationStmt                  *sql.Stmt
+	sweepCurtailmentTargetsToRestoreFailedStmt          *sql.Stmt
 	sweepExpiredEnrollmentsStmt                         *sql.Stmt
 	sweepExpiredFleetNodeAuthChallengesStmt             *sql.Stmt
 	sweepExpiredFleetNodeSessionsStmt                   *sql.Stmt
@@ -2905,6 +2976,7 @@ type Queries struct {
 	undeleteRoleStmt                                    *sql.Stmt
 	updateApiKeyLastUsedStmt                            *sql.Stmt
 	updateBuildingStmt                                  *sql.Stmt
+	updateCurtailmentEventOperatorFieldsStmt            *sql.Stmt
 	updateCurtailmentEventStateStmt                     *sql.Stmt
 	updateCurtailmentTargetStateStmt                    *sql.Stmt
 	updateCustomRoleNameStmt                            *sql.Stmt
@@ -2957,6 +3029,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		acquireReconcileLockStmt:                            q.acquireReconcileLockStmt,
 		addDevicesToDeviceSetStmt:                           q.addDevicesToDeviceSetStmt,
 		adminResetUserPasswordStmt:                          q.adminResetUserPasswordStmt,
+		adminTerminateCurtailmentEventStmt:                  q.adminTerminateCurtailmentEventStmt,
 		allDevicesBelongToOrgStmt:                           q.allDevicesBelongToOrgStmt,
 		assignBuildingToSiteStmt:                            q.assignBuildingToSiteStmt,
 		assignPermissionToRoleStmt:                          q.assignPermissionToRoleStmt,
@@ -2965,6 +3038,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		bindEnrollmentToFleetNodeStmt:                       q.bindEnrollmentToFleetNodeStmt,
 		buildingBelongsToOrgStmt:                            q.buildingBelongsToOrgStmt,
 		buildingsByIDsStmt:                                  q.buildingsByIDsStmt,
+		bulkInsertCurtailmentTargetsStmt:                    q.bulkInsertCurtailmentTargetsStmt,
+		bumpCurtailmentTargetRetryStmt:                      q.bumpCurtailmentTargetRetryStmt,
 		cancelEnrollmentForFleetNodeStmt:                    q.cancelEnrollmentForFleetNodeStmt,
 		cancelPendingEnrollmentStmt:                         q.cancelPendingEnrollmentStmt,
 		cascadeAddedDeviceSitesStmt:                         q.cascadeAddedDeviceSitesStmt,
@@ -3002,6 +3077,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		createSiteStmt:                                      q.createSiteStmt,
 		createUserStmt:                                      q.createUserStmt,
 		createUserOrganizationStmt:                          q.createUserOrganizationStmt,
+		curtailmentEventHasInFlightTargetsStmt:              q.curtailmentEventHasInFlightTargetsStmt,
 		deleteExpiredSessionsStmt:                           q.deleteExpiredSessionsStmt,
 		deleteOrganizationStmt:                              q.deleteOrganizationStmt,
 		deletePoolStmt:                                      q.deletePoolStmt,
@@ -3030,6 +3106,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getBuildingStmt:                                     q.getBuildingStmt,
 		getBuildingSiteStmt:                                 q.getBuildingSiteStmt,
 		getBuiltinRoleForOrgStmt:                            q.getBuiltinRoleForOrgStmt,
+		getCurtailmentEventByExternalReferenceStmt:          q.getCurtailmentEventByExternalReferenceStmt,
+		getCurtailmentEventByIdempotencyKeyStmt:             q.getCurtailmentEventByIdempotencyKeyStmt,
 		getCurtailmentEventByUUIDStmt:                       q.getCurtailmentEventByUUIDStmt,
 		getCurtailmentOrgConfigStmt:                         q.getCurtailmentOrgConfigStmt,
 		getCurtailmentReconcilerHeartbeatStmt:               q.getCurtailmentReconcilerHeartbeatStmt,
@@ -3125,7 +3203,6 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		hasUserStmt:                                         q.hasUserStmt,
 		insertActivityLogStmt:                               q.insertActivityLogStmt,
 		insertCurtailmentEventStmt:                          q.insertCurtailmentEventStmt,
-		insertCurtailmentTargetStmt:                         q.insertCurtailmentTargetStmt,
 		insertDeviceStmt:                                    q.insertDeviceStmt,
 		insertDeviceMetricsStmt:                             q.insertDeviceMetricsStmt,
 		insertErrorStmt:                                     q.insertErrorStmt,
@@ -3142,6 +3219,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listBuildingsByOrgStmt:                              q.listBuildingsByOrgStmt,
 		listBuiltinRolesForOrgStmt:                          q.listBuiltinRolesForOrgStmt,
 		listCurtailmentCandidatesByOrgStmt:                  q.listCurtailmentCandidatesByOrgStmt,
+		listCurtailmentEventsForOrgStmt:                     q.listCurtailmentEventsForOrgStmt,
 		listCurtailmentTargetsByEventStmt:                   q.listCurtailmentTargetsByEventStmt,
 		listCustomRolesForOrgStmt:                           q.listCustomRolesForOrgStmt,
 		listDeviceSetMembersPaginatedStmt:                   q.listDeviceSetMembersPaginatedStmt,
@@ -3218,6 +3296,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		softDeleteSiteStmt:                                  q.softDeleteSiteStmt,
 		softDeleteUserStmt:                                  q.softDeleteUserStmt,
 		softDeleteUserFromOrganizationStmt:                  q.softDeleteUserFromOrganizationStmt,
+		sweepCurtailmentTargetsToRestoreFailedStmt:          q.sweepCurtailmentTargetsToRestoreFailedStmt,
 		sweepExpiredEnrollmentsStmt:                         q.sweepExpiredEnrollmentsStmt,
 		sweepExpiredFleetNodeAuthChallengesStmt:             q.sweepExpiredFleetNodeAuthChallengesStmt,
 		sweepExpiredFleetNodeSessionsStmt:                   q.sweepExpiredFleetNodeSessionsStmt,
@@ -3231,6 +3310,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		undeleteRoleStmt:                                    q.undeleteRoleStmt,
 		updateApiKeyLastUsedStmt:                            q.updateApiKeyLastUsedStmt,
 		updateBuildingStmt:                                  q.updateBuildingStmt,
+		updateCurtailmentEventOperatorFieldsStmt:            q.updateCurtailmentEventOperatorFieldsStmt,
 		updateCurtailmentEventStateStmt:                     q.updateCurtailmentEventStateStmt,
 		updateCurtailmentTargetStateStmt:                    q.updateCurtailmentTargetStateStmt,
 		updateCustomRoleNameStmt:                            q.updateCustomRoleNameStmt,
