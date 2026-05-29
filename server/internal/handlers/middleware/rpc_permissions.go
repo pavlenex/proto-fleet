@@ -186,6 +186,17 @@ var ProcedurePermissions = map[string]string{
 	pairingv1connect.PairingServiceDiscoverProcedure: authz.PermMinerPair,
 	pairingv1connect.PairingServicePairProcedure:     authz.PermMinerPair,
 
+	// PoolsService — saved mining pool definitions. ValidatePool drives
+	// an outbound Stratum/SV2 handshake against the caller-supplied
+	// URL, so it sits on the manage key alongside the mutations to
+	// prevent a read-only role from triggering server-side network
+	// probes.
+	poolsv1connect.PoolsServiceListPoolsProcedure:    authz.PermPoolRead,
+	poolsv1connect.PoolsServiceValidatePoolProcedure: authz.PermPoolManage,
+	poolsv1connect.PoolsServiceCreatePoolProcedure:   authz.PermPoolManage,
+	poolsv1connect.PoolsServiceUpdatePoolProcedure:   authz.PermPoolManage,
+	poolsv1connect.PoolsServiceDeletePoolProcedure:   authz.PermPoolManage,
+
 	// ServerLogService — gated by PermServerlogRead.
 	serverlogv1connect.ServerLogServiceListServerLogsProcedure: authz.PermServerlogRead,
 
@@ -243,15 +254,6 @@ var ProceduresPendingMigration = map[string]string{
 	fleetnodeadminv1connect.FleetNodeAdminServiceUnpairDeviceProcedure:          "UNIMPLEMENTED STUB: handler does not override, returns Unimplemented with no gate",
 	fleetnodeadminv1connect.FleetNodeAdminServiceListFleetNodeDevicesProcedure:  "UNIMPLEMENTED STUB: handler does not override, returns Unimplemented with no gate",
 	fleetnodeadminv1connect.FleetNodeAdminServiceDiscoverOnFleetNodeProcedure:   "UNIMPLEMENTED STUB: handler does not override, returns Unimplemented with no gate",
-
-	// PoolsService — operator-managed pool definitions. Needs a new
-	// pool:read / pool:manage catalog pair + ADMIN backfill migration;
-	// deferred from the new-gate slice.
-	poolsv1connect.PoolsServiceCreatePoolProcedure:   "ungated; needs new pool:manage catalog key",
-	poolsv1connect.PoolsServiceListPoolsProcedure:    "ungated; needs new pool:read catalog key",
-	poolsv1connect.PoolsServiceUpdatePoolProcedure:   "ungated; needs new pool:manage catalog key",
-	poolsv1connect.PoolsServiceDeletePoolProcedure:   "ungated; needs new pool:manage catalog key",
-	poolsv1connect.PoolsServiceValidatePoolProcedure: "ungated; needs new pool:read catalog key",
 
 	// ScheduleService — operator-managed schedules. Needs a new
 	// schedule:read / schedule:manage catalog pair + ADMIN backfill
