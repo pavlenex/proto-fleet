@@ -493,16 +493,25 @@ func (s *Service) AdminTerminate(ctx context.Context, req AdminTerminateRequest)
 // a transient audit failure increments IncAuditWriteFailure but doesn't
 // roll back the committed Start.
 func (s *Service) emitStartAuditTrail(ctx context.Context, req StartRequest, plan *Plan) {
+	mode := req.Mode
+	if mode == "" {
+		mode = models.ModeFixedKw
+	}
 	metadata := map[string]any{
 		"strategy":                  string(req.Strategy),
 		"level":                     string(req.Level),
 		"priority":                  string(req.Priority),
 		"scope_type":                string(req.Scope.Type),
+		"mode":                      string(mode),
 		"selected_count":            len(plan.Selected),
 		"skipped_count":             len(plan.Skipped),
 		"allow_unbounded":           req.AllowUnbounded,
 		"force_include_maintenance": req.ForceIncludeMaintenance,
 		"source_actor":              string(req.SourceActorType),
+	}
+	if mode == models.ModeFixedKw {
+		metadata["target_kw"] = req.TargetKW
+		metadata["tolerance_kw"] = req.ToleranceKW
 	}
 	if plan.EventUUID != nil {
 		metadata["event_uuid"] = plan.EventUUID.String()
@@ -1398,6 +1407,25 @@ func (s *Service) Stop(ctx context.Context, req StopRequest) (*models.Event, err
 	}
 
 	return s.store.BeginRestoreTransition(ctx, req.OrgID, req.EventUUID)
+}
+
+// RecurtailRequest re-asserts curtailment on a restoring event.
+type RecurtailRequest struct {
+	OrgID     int64
+	EventUUID uuid.UUID
+}
+
+// Recurtail flips a restoring event back to pending and reclaims restore
+// targets. Non-restoring non-terminal events are idempotent; terminal events
+// fail.
+func (s *Service) Recurtail(ctx context.Context, req RecurtailRequest) (*models.Event, error) {
+	if req.OrgID <= 0 {
+		return nil, fleeterror.NewInvalidArgumentError("org_id must be set")
+	}
+	if req.EventUUID == uuid.Nil {
+		return nil, fleeterror.NewInvalidArgumentError("event_uuid must be set")
+	}
+	return s.store.BeginRecurtailTransition(ctx, req.OrgID, req.EventUUID)
 }
 
 func validateStopRequest(req StopRequest) error {

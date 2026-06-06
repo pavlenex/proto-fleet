@@ -187,4 +187,13 @@ type CurtailmentStore interface {
 		orgID int64,
 		eventUUID uuid.UUID,
 	) (*models.Event, error)
+
+	// BeginRecurtailTransition flips a restoring event back to pending and resets
+	// restore targets for Curtail dispatch. Target overlap rolls back and returns
+	// AlreadyExists.
+	BeginRecurtailTransition(
+		ctx context.Context,
+		orgID int64,
+		eventUUID uuid.UUID,
+	) (*models.Event, error)
 }

@@ -659,6 +659,81 @@ func (s *SQLCurtailmentStore) BeginRestoreTransition(
 	})
 }
 
+// BeginRecurtailTransition flips a restoring event back to pending and resets
+// restore targets for Curtail dispatch. Any target overlap rolls back so the
+// watchdog can retry while the event remains restoring.
+func (s *SQLCurtailmentStore) BeginRecurtailTransition(
+	ctx context.Context,
+	orgID int64,
+	eventUUID uuid.UUID,
+) (*models.Event, error) {
+	return db.WithTransaction(ctx, s.conn.DB, func(q *sqlc.Queries) (*models.Event, error) {
+		current, err := q.GetCurtailmentEventByUUID(ctx, sqlc.GetCurtailmentEventByUUIDParams{
+			EventUuid: eventUUID,
+			OrgID:     orgID,
+		})
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fleeterror.NewNotFoundErrorf("curtailment event not found: %s", eventUUID)
+		}
+		if err != nil {
+			return nil, fleeterror.NewInternalErrorf("failed to get curtailment event: %v", err)
+		}
+
+		state := models.EventState(current.State)
+		if state.IsTerminal() {
+			return nil, fleeterror.NewFailedPreconditionErrorf(
+				"cannot re-curtail event %s in terminal state %q",
+				eventUUID, current.State,
+			)
+		}
+		if state != models.EventStateRestoring {
+			return convertEventRow(current), nil
+		}
+
+		updated, err := q.ResumeCurtailmentFromRestoring(ctx, current.ID)
+		if errors.Is(err, sql.ErrNoRows) {
+			latest, getErr := q.GetCurtailmentEventByUUID(ctx, sqlc.GetCurtailmentEventByUUIDParams{
+				EventUuid: eventUUID,
+				OrgID:     orgID,
+			})
+			if getErr != nil {
+				return nil, fleeterror.NewInternalErrorf("failed to re-read curtailment event after concurrent state change: %v", getErr)
+			}
+			if models.EventState(latest.State).IsTerminal() {
+				return nil, fleeterror.NewFailedPreconditionErrorf(
+					"cannot re-curtail event %s in terminal state %q",
+					eventUUID, latest.State,
+				)
+			}
+			return convertEventRow(latest), nil
+		}
+		if err != nil {
+			return nil, fleeterror.NewInternalErrorf("failed to resume curtailment from restoring: %v", err)
+		}
+
+		reset, err := q.ResetCurtailmentTargetsForRecurtail(ctx, current.ID)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == pgErrCodeUniqueViolation &&
+				pgErr.ConstraintName == deviceNonTerminalUniqueIndex {
+				return nil, fleeterror.NewAlreadyExistsError(
+					"one or more curtailment targets are already in a non-terminal curtailment; retry",
+				)
+			}
+			return nil, fleeterror.NewInternalErrorf("failed to reset curtailment targets for re-curtail: %v", err)
+		}
+		if reset.ResetCount != reset.TargetCount {
+			return nil, fleeterror.NewAlreadyExistsErrorf(
+				"re-curtail reset %d of %d targets; one or more targets are already in a non-terminal curtailment; retry",
+				reset.ResetCount,
+				reset.TargetCount,
+			)
+		}
+
+		return convertEventRow(updated), nil
+	})
+}
+
 func (s *SQLCurtailmentStore) GetHeartbeat(ctx context.Context) (*models.Heartbeat, error) {
 	row, err := s.GetQueries(ctx).GetCurtailmentReconcilerHeartbeat(ctx)
 	if err != nil {

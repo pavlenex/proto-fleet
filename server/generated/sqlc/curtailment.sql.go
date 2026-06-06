@@ -1263,6 +1263,58 @@ func (q *Queries) ListRecentlyResolvedCurtailedDevicesByOrg(ctx context.Context,
 	return items, nil
 }
 
+const resetCurtailmentTargetsForRecurtail = `-- name: ResetCurtailmentTargetsForRecurtail :one
+WITH recurtail_candidates AS MATERIALIZED (
+    SELECT ct.curtailment_event_id, ct.device_identifier
+    FROM curtailment_target AS ct
+    WHERE ct.curtailment_event_id = $1
+      AND ct.desired_state = 'active'
+      AND ct.state <> 'released'
+),
+reset_targets AS (
+    UPDATE curtailment_target AS target
+    SET desired_state      = 'curtailed',
+        state              = 'pending',
+        retry_count        = 0,
+        last_dispatched_at = NULL,
+        last_batch_uuid    = NULL,
+        confirmed_at       = NULL,
+        last_error         = NULL
+    FROM recurtail_candidates candidate
+    WHERE target.curtailment_event_id = candidate.curtailment_event_id
+      AND target.device_identifier = candidate.device_identifier
+      AND NOT EXISTS (
+          SELECT 1
+          FROM curtailment_target other_target
+          JOIN curtailment_event other_event
+              ON other_event.id = other_target.curtailment_event_id
+          WHERE other_target.device_identifier = candidate.device_identifier
+            AND other_target.curtailment_event_id <> $1
+            AND other_event.state IN ('pending', 'active', 'restoring')
+            AND other_target.state NOT IN ('resolved', 'restore_failed', 'released')
+      )
+    RETURNING 1
+)
+SELECT
+    (SELECT count(*) FROM recurtail_candidates)::BIGINT AS target_count,
+    (SELECT count(*) FROM reset_targets)::BIGINT AS reset_count
+`
+
+type ResetCurtailmentTargetsForRecurtailRow struct {
+	TargetCount int64
+	ResetCount  int64
+}
+
+// Reopen restore targets for curtailment. Counts let the store reject partial
+// resets when another non-terminal event already has unresolved work for one
+// of the same devices.
+func (q *Queries) ResetCurtailmentTargetsForRecurtail(ctx context.Context, curtailmentEventID int64) (ResetCurtailmentTargetsForRecurtailRow, error) {
+	row := q.queryRow(ctx, q.resetCurtailmentTargetsForRecurtailStmt, resetCurtailmentTargetsForRecurtail, curtailmentEventID)
+	var i ResetCurtailmentTargetsForRecurtailRow
+	err := row.Scan(&i.TargetCount, &i.ResetCount)
+	return i, err
+}
+
 const resetCurtailmentTargetsForRestore = `-- name: ResetCurtailmentTargetsForRestore :exec
 UPDATE curtailment_target
 SET desired_state      = 'active',
@@ -1282,6 +1334,58 @@ WHERE curtailment_event_id = $1
 func (q *Queries) ResetCurtailmentTargetsForRestore(ctx context.Context, curtailmentEventID int64) error {
 	_, err := q.exec(ctx, q.resetCurtailmentTargetsForRestoreStmt, resetCurtailmentTargetsForRestore, curtailmentEventID)
 	return err
+}
+
+const resumeCurtailmentFromRestoring = `-- name: ResumeCurtailmentFromRestoring :one
+UPDATE curtailment_event
+SET state = 'pending'
+WHERE id = $1
+  AND state = 'restoring'
+RETURNING id, event_uuid, org_id, state, mode, strategy, level, priority, loop_type, scope_type, scope_jsonb, mode_params_jsonb, restore_batch_size, restore_batch_interval_sec, effective_batch_size, min_curtailed_duration_sec, max_duration_seconds, allow_unbounded, include_maintenance, force_include_maintenance, decision_snapshot_jsonb, source_actor_type, source_actor_id, external_source, external_reference, idempotency_key, supersedes_event_id, reason, scheduled_start_at, started_at, ended_at, created_at, updated_at, created_by_user_id
+`
+
+// Restore reversal: go back through pending so the curtail dispatcher picks
+// up reset targets.
+func (q *Queries) ResumeCurtailmentFromRestoring(ctx context.Context, id int64) (CurtailmentEvent, error) {
+	row := q.queryRow(ctx, q.resumeCurtailmentFromRestoringStmt, resumeCurtailmentFromRestoring, id)
+	var i CurtailmentEvent
+	err := row.Scan(
+		&i.ID,
+		&i.EventUuid,
+		&i.OrgID,
+		&i.State,
+		&i.Mode,
+		&i.Strategy,
+		&i.Level,
+		&i.Priority,
+		&i.LoopType,
+		&i.ScopeType,
+		&i.ScopeJsonb,
+		&i.ModeParamsJsonb,
+		&i.RestoreBatchSize,
+		&i.RestoreBatchIntervalSec,
+		&i.EffectiveBatchSize,
+		&i.MinCurtailedDurationSec,
+		&i.MaxDurationSeconds,
+		&i.AllowUnbounded,
+		&i.IncludeMaintenance,
+		&i.ForceIncludeMaintenance,
+		&i.DecisionSnapshotJsonb,
+		&i.SourceActorType,
+		&i.SourceActorID,
+		&i.ExternalSource,
+		&i.ExternalReference,
+		&i.IdempotencyKey,
+		&i.SupersedesEventID,
+		&i.Reason,
+		&i.ScheduledStartAt,
+		&i.StartedAt,
+		&i.EndedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CreatedByUserID,
+	)
+	return i, err
 }
 
 const sweepCurtailmentTargetsToRestoreFailed = `-- name: SweepCurtailmentTargetsToRestoreFailed :exec

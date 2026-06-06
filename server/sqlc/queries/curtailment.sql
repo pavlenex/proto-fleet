@@ -399,6 +399,54 @@ SET desired_state      = 'active',
 WHERE curtailment_event_id = sqlc.arg('curtailment_event_id')
   AND state NOT IN ('resolved', 'restore_failed', 'released');
 
+-- name: ResumeCurtailmentFromRestoring :one
+-- Restore reversal: go back through pending so the curtail dispatcher picks
+-- up reset targets.
+UPDATE curtailment_event
+SET state = 'pending'
+WHERE id = sqlc.arg('id')
+  AND state = 'restoring'
+RETURNING *;
+
+-- name: ResetCurtailmentTargetsForRecurtail :one
+-- Reopen restore targets for curtailment. Counts let the store reject partial
+-- resets when another non-terminal event already has unresolved work for one
+-- of the same devices.
+WITH recurtail_candidates AS MATERIALIZED (
+    SELECT ct.curtailment_event_id, ct.device_identifier
+    FROM curtailment_target AS ct
+    WHERE ct.curtailment_event_id = sqlc.arg('curtailment_event_id')
+      AND ct.desired_state = 'active'
+      AND ct.state <> 'released'
+),
+reset_targets AS (
+    UPDATE curtailment_target AS target
+    SET desired_state      = 'curtailed',
+        state              = 'pending',
+        retry_count        = 0,
+        last_dispatched_at = NULL,
+        last_batch_uuid    = NULL,
+        confirmed_at       = NULL,
+        last_error         = NULL
+    FROM recurtail_candidates candidate
+    WHERE target.curtailment_event_id = candidate.curtailment_event_id
+      AND target.device_identifier = candidate.device_identifier
+      AND NOT EXISTS (
+          SELECT 1
+          FROM curtailment_target other_target
+          JOIN curtailment_event other_event
+              ON other_event.id = other_target.curtailment_event_id
+          WHERE other_target.device_identifier = candidate.device_identifier
+            AND other_target.curtailment_event_id <> sqlc.arg('curtailment_event_id')
+            AND other_event.state IN ('pending', 'active', 'restoring')
+            AND other_target.state NOT IN ('resolved', 'restore_failed', 'released')
+      )
+    RETURNING 1
+)
+SELECT
+    (SELECT count(*) FROM recurtail_candidates)::BIGINT AS target_count,
+    (SELECT count(*) FROM reset_targets)::BIGINT AS reset_count;
+
 -- name: UpdateCurtailmentTargetState :execrows
 -- Reconciler patch. COALESCE preserves un-supplied columns; empty
 -- last_error is the explicit clear sentinel that maps to SQL NULL.
