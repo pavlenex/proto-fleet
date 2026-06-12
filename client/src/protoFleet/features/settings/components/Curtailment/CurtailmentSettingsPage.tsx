@@ -3,14 +3,20 @@ import { Navigate, useNavigate } from "react-router-dom";
 import clsx from "clsx";
 
 import { useCurtailmentApi } from "@/protoFleet/api/useCurtailmentApi";
-import useCurtailmentResponseProfiles from "@/protoFleet/api/useCurtailmentResponseProfiles";
+import useCurtailmentAutomationRules from "@/protoFleet/api/useCurtailmentAutomationRules";
+import useCurtailmentResponseProfiles, {
+  getResponseProfileScopeLabelForActionType,
+} from "@/protoFleet/api/useCurtailmentResponseProfiles";
 import useMqttCurtailmentSources from "@/protoFleet/api/useMqttCurtailmentSources";
 import CurtailmentStartModal, {
   type CurtailmentFormValues,
   type CurtailmentSubmitValues,
   type ResponseProfileModalMode,
 } from "@/protoFleet/features/energy/CurtailmentStartModal";
+import CurtailmentAutomationsContent from "@/protoFleet/features/settings/components/Curtailment/CurtailmentAutomations";
 import type {
+  AutomationRule,
+  AutomationRuleFormValues,
   CurtailmentHealth,
   CurtailmentSource,
   CurtailmentSourceFormValues,
@@ -123,8 +129,10 @@ const emptySourceFormValues: CurtailmentSourceFormValues = {
 
 const emptyCurtailmentSources: CurtailmentSource[] = [];
 const emptyResponseProfiles: ResponseProfile[] = [];
+const emptyAutomationRules: AutomationRule[] = [];
 const emptyUpdatingSourceIds = new Set<string>();
 const emptyUpdatingResponseProfileIds = new Set<string>();
+const emptyUpdatingAutomationRuleIds = new Set<string>();
 const savedPasswordPlaceholder = "......";
 const immediateRestoreBatchSize = "10000";
 
@@ -199,7 +207,9 @@ function getResponseProfileDeadlineSummary(values: ResponseProfileFormValues): s
 }
 
 function getResponseProfileScopeSummary(values: ResponseProfileFormValues): string {
-  return values.siteName || (values.siteId ? `Site ${values.siteId}` : "Whole fleet");
+  return values.siteId
+    ? values.siteName || `Site ${values.siteId}`
+    : getResponseProfileScopeLabelForActionType(values.actionType);
 }
 
 function secondsToDeadlineMinutes(value: string): string {
@@ -252,7 +262,7 @@ function createResponseProfileFromFormValues(
     targetKw: values.targetKw.trim(),
     deviceIdentifiers: [],
     siteId: values.siteId.trim(),
-    siteName: values.siteName.trim(),
+    siteName: values.siteId.trim() ? values.siteName.trim() : "",
     minDurationSec: values.minDurationSec.trim(),
     maxDurationSec: values.maxDurationSec.trim(),
     curtailBatchSize: values.curtailBatchSize.trim(),
@@ -266,7 +276,6 @@ function createResponseProfileFromFormValues(
     id: existingProfile?.id ?? createResponseProfileId(normalizedValues.name, existingProfiles),
     name: normalizedValues.name,
     targetSummary: getResponseProfileTargetSummary(normalizedValues),
-    siteId: normalizedValues.siteId,
     scope: getResponseProfileScopeSummary(normalizedValues),
     selectionStrategy: responseProfileSelectionStrategyLabel[normalizedValues.selectionStrategy],
     restoreBehavior: responseProfileRestoreBehaviorLabel[normalizedValues.restoreBehavior],
@@ -275,9 +284,20 @@ function createResponseProfileFromFormValues(
   };
 }
 
+function removeResponseProfileScope(values: ResponseProfileFormValues): ResponseProfileFormValues {
+  const siteId = values.siteId.trim();
+
+  return {
+    ...values,
+    deviceIdentifiers: [],
+    siteId,
+    siteName: siteId ? values.siteName.trim() : "",
+  };
+}
+
 function createResponseProfileFormValuesFromProfile(profile: ResponseProfile): ResponseProfileFormValues {
   if (profile.formValues) {
-    return profile.formValues;
+    return removeResponseProfileScope(profile.formValues);
   }
 
   const targetKwMatch = profile.targetSummary.match(/(\d+(?:\.\d+)?)/);
@@ -288,8 +308,8 @@ function createResponseProfileFormValuesFromProfile(profile: ResponseProfile): R
     actionType,
     targetKw: targetKwMatch?.[1] ?? "",
     deviceIdentifiers: [],
-    siteId: profile.siteId,
-    siteName: profile.scope,
+    siteId: "",
+    siteName: "",
     selectionStrategy: getOptionValueByLabel(
       responseProfileSelectionStrategyOptions,
       profile.selectionStrategy,
@@ -323,11 +343,13 @@ function createCurtailmentFormValuesFromResponseProfile(
   const restoreBatchSize =
     values.restoreBatchSize ||
     (values.restoreBehavior === "automaticImmediateRestore" ? immediateRestoreBatchSize : "");
+  const siteId = values.siteId.trim();
+  const siteName = siteId ? values.siteName || `Site ${siteId}` : "";
 
   return {
-    scopeType: values.siteId ? "site" : "wholeOrg",
-    scopeId: values.siteName || (values.siteId ? `Site ${values.siteId}` : "whole-org"),
-    siteId: values.siteId,
+    scopeType: siteId ? "site" : "wholeOrg",
+    scopeId: siteId ? siteName : "whole-org",
+    siteId,
     deviceSetIds: [],
     deviceIdentifiers: [],
     responseProfileId: "customPlan",
@@ -362,8 +384,8 @@ function getResponseProfileRestoreBehavior(
 function createResponseProfileFormValuesFromCurtailmentValues(
   values: CurtailmentSubmitValues,
 ): ResponseProfileFormValues {
-  const siteId = values.siteId ?? "";
-  const siteName = values.scopeType === "site" ? (values.scopeId ?? "") : "";
+  const siteId = values.scopeType === "site" ? (values.siteId ?? "") : "";
+  const siteName = siteId ? (values.scopeId ?? "") : "";
 
   return {
     name: values.reason,
@@ -984,19 +1006,25 @@ type CurtailmentSettingsContentProps = {
   initialResponseProfileModalOpen?: boolean;
   initialSources?: CurtailmentSource[];
   initialSourceModalOpen?: boolean;
+  initialAutomationRules?: AutomationRule[];
   responseProfiles?: ResponseProfile[];
   sources?: CurtailmentSource[];
+  automationRules?: AutomationRule[];
   isLoadingResponseProfiles?: boolean;
   loadResponseProfilesError?: string | null;
   isLoadingSources?: boolean;
   loadSourcesError?: string | null;
+  isLoadingAutomationRules?: boolean;
+  loadAutomationRulesError?: string | null;
   isSavingResponseProfile?: boolean;
   isTestingResponseProfileCurtailment?: boolean;
   isDeletingResponseProfile?: boolean;
   isSavingSource?: boolean;
   isTestingSourceConnection?: boolean;
+  isSavingAutomationRule?: boolean;
   updatingResponseProfileIds?: ReadonlySet<string>;
   updatingSourceIds?: ReadonlySet<string>;
+  updatingAutomationRuleIds?: ReadonlySet<string>;
   onCreateResponseProfile?: (values: ResponseProfileFormValues) => Promise<ResponseProfile | void>;
   onUpdateResponseProfile?: (
     profile: ResponseProfile,
@@ -1015,6 +1043,10 @@ type CurtailmentSettingsContentProps = {
   onTestSourceConnection?: (values: CurtailmentSourceFormValues) => Promise<void>;
   onToggleSource?: (source: CurtailmentSource, enabled: boolean) => Promise<CurtailmentSource | void>;
   onDeleteSource?: (source: CurtailmentSource) => Promise<void>;
+  onCreateAutomation?: (values: AutomationRuleFormValues) => Promise<AutomationRule | void>;
+  onUpdateAutomation?: (rule: AutomationRule, values: AutomationRuleFormValues) => Promise<AutomationRule | void>;
+  onToggleAutomation?: (rule: AutomationRule, enabled: boolean) => Promise<AutomationRule | void>;
+  onDeleteAutomation?: (rule: AutomationRule) => Promise<void>;
 };
 
 function getSourcesEmptyState(loadSourcesError: string | null, isLoadingSources: boolean): ReactElement {
@@ -1034,19 +1066,25 @@ export function CurtailmentSettingsContent({
   initialResponseProfileModalOpen = false,
   initialSources = emptyCurtailmentSources,
   initialSourceModalOpen = false,
+  initialAutomationRules = emptyAutomationRules,
   responseProfiles: controlledResponseProfiles,
   sources: controlledSources,
+  automationRules: controlledAutomationRules,
   isLoadingResponseProfiles = false,
   loadResponseProfilesError = null,
   isLoadingSources = false,
   loadSourcesError = null,
+  isLoadingAutomationRules = false,
+  loadAutomationRulesError = null,
   isSavingResponseProfile = false,
   isTestingResponseProfileCurtailment = false,
   isDeletingResponseProfile = false,
   isSavingSource = false,
   isTestingSourceConnection = false,
+  isSavingAutomationRule = false,
   updatingResponseProfileIds = emptyUpdatingResponseProfileIds,
   updatingSourceIds = emptyUpdatingSourceIds,
+  updatingAutomationRuleIds = emptyUpdatingAutomationRuleIds,
   onCreateResponseProfile,
   onUpdateResponseProfile,
   onTestResponseProfileCurtailment,
@@ -1056,6 +1094,10 @@ export function CurtailmentSettingsContent({
   onTestSourceConnection,
   onToggleSource,
   onDeleteSource,
+  onCreateAutomation,
+  onUpdateAutomation,
+  onToggleAutomation,
+  onDeleteAutomation,
 }: CurtailmentSettingsContentProps): ReactElement {
   const [localResponseProfiles, setLocalResponseProfiles] = useState<ResponseProfile[]>(() => [
     ...initialResponseProfiles,
@@ -1325,7 +1367,7 @@ export function CurtailmentSettingsContent({
         />
       </section>
 
-      <section className="curtailment-settings__section curtailment-settings__section--last">
+      <section className="curtailment-settings__section">
         <SectionHeader
           title="Sources"
           buttonText="Add source"
@@ -1351,6 +1393,25 @@ export function CurtailmentSettingsContent({
           onRowClick={openEditSourceModal}
         />
       </section>
+
+      <CurtailmentAutomationsContent
+        initialAutomationRules={initialAutomationRules}
+        automationRules={controlledAutomationRules}
+        sources={sources}
+        responseProfiles={responseProfiles}
+        isLoading={isLoadingAutomationRules}
+        loadError={loadAutomationRulesError}
+        isCreating={isSavingAutomationRule}
+        updatingRuleIds={updatingAutomationRuleIds}
+        isLoadingSources={isLoadingSources}
+        loadSourcesError={loadSourcesError}
+        isLoadingResponseProfiles={isLoadingResponseProfiles}
+        loadResponseProfilesError={loadResponseProfilesError}
+        onCreateAutomation={onCreateAutomation}
+        onUpdateAutomation={onUpdateAutomation}
+        onToggleAutomation={onToggleAutomation}
+        onDeleteAutomation={onDeleteAutomation}
+      />
 
       <CurtailmentStartModal
         key={
@@ -1418,6 +1479,17 @@ function CurtailmentSettingsPage(): ReactElement {
     setSourceEnabled,
     deleteSource,
   } = useMqttCurtailmentSources(canManageCurtailment);
+  const {
+    automationRules,
+    isLoading: isLoadingAutomationRules,
+    isCreating: isCreatingAutomationRule,
+    updatingRuleIds: updatingAutomationRuleIds,
+    loadError: automationRulesLoadError,
+    createAutomationRule,
+    updateAutomationRule,
+    setAutomationRuleEnabled,
+    deleteAutomationRule,
+  } = useCurtailmentAutomationRules(canManageCurtailment);
 
   useEffect(() => {
     if (!loadError) {
@@ -1440,6 +1512,17 @@ function CurtailmentSettingsPage(): ReactElement {
       status: STATUSES.error,
     });
   }, [responseProfilesLoadError]);
+
+  useEffect(() => {
+    if (!automationRulesLoadError) {
+      return;
+    }
+
+    pushToast({
+      message: automationRulesLoadError,
+      status: STATUSES.error,
+    });
+  }, [automationRulesLoadError]);
 
   const handleCreateResponseProfile = useCallback(
     async (values: ResponseProfileFormValues) => {
@@ -1553,6 +1636,56 @@ function CurtailmentSettingsPage(): ReactElement {
     [deleteSource],
   );
 
+  const handleCreateAutomation = useCallback(
+    async (values: AutomationRuleFormValues) => {
+      const rule = await createAutomationRule(values);
+      pushToast({
+        message: "Automation added",
+        status: STATUSES.success,
+      });
+      return rule;
+    },
+    [createAutomationRule],
+  );
+
+  const handleUpdateAutomation = useCallback(
+    async (rule: AutomationRule, values: AutomationRuleFormValues) => {
+      const updatedRule = await updateAutomationRule(rule.id, values);
+      pushToast({
+        message: "Automation saved",
+        status: STATUSES.success,
+      });
+      return updatedRule;
+    },
+    [updateAutomationRule],
+  );
+
+  const handleToggleAutomation = useCallback(
+    async (rule: AutomationRule, enabled: boolean) => {
+      try {
+        return await setAutomationRuleEnabled(rule.id, enabled);
+      } catch (error) {
+        pushToast({
+          message: getErrorMessage(error, "Failed to update automation."),
+          status: STATUSES.error,
+        });
+        throw error;
+      }
+    },
+    [setAutomationRuleEnabled],
+  );
+
+  const handleDeleteAutomation = useCallback(
+    async (rule: AutomationRule) => {
+      await deleteAutomationRule(rule.id);
+      pushToast({
+        message: "Automation deleted",
+        status: STATUSES.success,
+      });
+    },
+    [deleteAutomationRule],
+  );
+
   if (!canManageCurtailment) {
     return <Navigate to="/settings/general" replace />;
   }
@@ -1561,16 +1694,21 @@ function CurtailmentSettingsPage(): ReactElement {
     <CurtailmentSettingsContent
       responseProfiles={responseProfiles}
       sources={sources}
+      automationRules={automationRules}
       isLoadingResponseProfiles={isLoadingResponseProfiles}
       loadResponseProfilesError={responseProfilesLoadError}
       isLoadingSources={isLoading}
       loadSourcesError={loadError}
+      isLoadingAutomationRules={isLoadingAutomationRules}
+      loadAutomationRulesError={automationRulesLoadError}
       isSavingResponseProfile={isCreatingResponseProfile}
       isTestingResponseProfileCurtailment={isTestingResponseProfileCurtailment}
       isSavingSource={isCreating}
       isTestingSourceConnection={isTestingConnection}
+      isSavingAutomationRule={isCreatingAutomationRule}
       updatingResponseProfileIds={updatingProfileIds}
       updatingSourceIds={updatingSourceIds}
+      updatingAutomationRuleIds={updatingAutomationRuleIds}
       onCreateResponseProfile={handleCreateResponseProfile}
       onUpdateResponseProfile={handleUpdateResponseProfile}
       onTestResponseProfileCurtailment={handleTestResponseProfileCurtailment}
@@ -1580,6 +1718,10 @@ function CurtailmentSettingsPage(): ReactElement {
       onTestSourceConnection={handleTestSourceConnection}
       onToggleSource={handleToggleSource}
       onDeleteSource={handleDeleteSource}
+      onCreateAutomation={handleCreateAutomation}
+      onUpdateAutomation={handleUpdateAutomation}
+      onToggleAutomation={handleToggleAutomation}
+      onDeleteAutomation={handleDeleteAutomation}
     />
   );
 }

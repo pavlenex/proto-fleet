@@ -33,7 +33,7 @@ vi.mock("@/protoFleet/features/energy/useCurtailmentPlanPreview", () => ({
     selectedMinerCount: source.selectedMinerCount,
     targetKw: source.targetKw ?? Number(values.targetKw),
     estimatedReductionKw: source.estimatedReductionKw,
-    curtailEstimate: "5 minutes - 30 minutes",
+    curtailEstimate: "~1 minute",
     restoreEstimate: "~2 minutes",
     scopeLabel: "across the fleet",
   }),
@@ -144,7 +144,7 @@ const preview: CurtailmentPlanPreview = {
   selectedMinerCount: 18,
   targetKw: 40,
   estimatedReductionKw: 45,
-  curtailEstimate: "5 minutes - 30 minutes",
+  curtailEstimate: "~1 minute",
   restoreEstimate: "~2 minutes",
   scopeLabel: "across the fleet",
 };
@@ -257,7 +257,7 @@ describe("CurtailmentStartModal", () => {
     expect(screen.getByRole("button", { name: "Profile" })).toHaveTextContent("Standard shed");
     expect(screen.getByLabelText("Reason")).toHaveValue("Operator-requested event");
     expect(screen.getByLabelText("Fixed target reduction (kW)")).toHaveValue("50");
-    expect(screen.getByRole("button", { name: /Miners\s+3 miners/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Miners\s+Select/ })).toBeInTheDocument();
     expect(screen.queryByLabelText("Min duration (sec)")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Max duration (sec)")).not.toBeInTheDocument();
     expect(screen.queryByTestId("curtailment-curtail-batch-size")).not.toBeInTheDocument();
@@ -308,6 +308,7 @@ describe("CurtailmentStartModal", () => {
     expect(screen.getByLabelText("Profile name")).toHaveValue("Grid peak - ERCOT 4CP signal");
     expect(screen.queryByLabelText("Reason")).not.toBeInTheDocument();
     expect(screen.queryByText("No miners match this curtailment.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Apply to")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Miners\s+Select/ })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Min duration (sec)")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Max duration (sec)")).not.toBeInTheDocument();
@@ -328,7 +329,7 @@ describe("CurtailmentStartModal", () => {
     expect(screen.getByText("Run curtailment?")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "This will save the profile, then trigger curtailment for miners in Austin, TX. Schedules stay suppressed until miners are restored.",
+        "This will save the profile, then trigger curtailment for the whole fleet. Schedules stay suppressed until miners are restored.",
       ),
     ).toBeInTheDocument();
     expect(onTestCurtailment).not.toHaveBeenCalled();
@@ -336,14 +337,14 @@ describe("CurtailmentStartModal", () => {
     expect(onTestCurtailment).toHaveBeenCalledWith(
       expect.objectContaining({
         reason: "Grid peak - ERCOT 4CP signal",
-        siteId: "101",
+        siteId: "",
         curtailmentMode: "fullFleet",
         curtailBatchSize: "8",
         curtailBatchIntervalSec: "30",
         restoreBatchSize: "10",
         restoreIntervalSec: "120",
-        scopeType: "site",
-        scopeId: "Austin, TX",
+        scopeType: "wholeOrg",
+        scopeId: "whole-org",
         deviceSetIds: [],
         deviceIdentifiers: [],
         includeMaintenance: true,
@@ -356,13 +357,13 @@ describe("CurtailmentStartModal", () => {
     expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({
         reason: "Grid peak - ERCOT 4CP signal",
-        siteId: "101",
+        siteId: "",
         curtailBatchSize: "8",
         curtailBatchIntervalSec: "30",
         restoreBatchSize: "10",
         restoreIntervalSec: "120",
-        scopeType: "site",
-        scopeId: "Austin, TX",
+        scopeType: "wholeOrg",
+        scopeId: "whole-org",
         deviceSetIds: [],
         deviceIdentifiers: [],
         includeMaintenance: true,
@@ -388,7 +389,7 @@ describe("CurtailmentStartModal", () => {
     expect(screen.getAllByLabelText("Loading curtailment preview")).toHaveLength(2);
   });
 
-  it("lowercases all-sites scope labels inside response profile confirmation sentences", async () => {
+  it("normalizes response profile initial scopes inside confirmation sentences", async () => {
     const user = userEvent.setup();
     renderModal({
       variant: "responseProfile",
@@ -406,7 +407,7 @@ describe("CurtailmentStartModal", () => {
 
     expect(
       screen.getByText(
-        "This will save the profile, then trigger curtailment for miners in all sites. Schedules stay suppressed until miners are restored.",
+        "This will save the profile, then trigger curtailment for miners across the fleet. Schedules stay suppressed until miners are restored.",
       ),
     ).toBeInTheDocument();
   });
@@ -482,6 +483,7 @@ describe("CurtailmentStartModal", () => {
     expect(screen.getByText("Restore behavior")).toBeInTheDocument();
     expect(screen.getByTestId("response-profile-restore-batch-size")).toHaveValue("10000");
     expect(screen.getByTestId("response-profile-restore-batch-interval")).toHaveValue("0");
+    expect(screen.queryByText("Apply to")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Miners\s+Select/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Run curtailment" })).toBeEnabled();
@@ -504,6 +506,8 @@ describe("CurtailmentStartModal", () => {
       expect.objectContaining({
         reason: "Site Alpha 750 kW",
         siteId: "102",
+        scopeType: "site",
+        scopeId: "Denver, CO",
         targetKw: "750",
         curtailBatchSize: "50",
         curtailBatchIntervalSec: "30",
@@ -518,6 +522,8 @@ describe("CurtailmentStartModal", () => {
       expect.objectContaining({
         reason: "Site Alpha 750 kW",
         siteId: "102",
+        scopeType: "site",
+        scopeId: "Denver, CO",
         targetKw: "750",
         curtailBatchSize: "50",
         curtailBatchIntervalSec: "30",
@@ -705,7 +711,7 @@ describe("CurtailmentStartModal", () => {
 
     expect(screen.getAllByText("Curtail 18 miners across the fleet immediately")).toHaveLength(2);
     expect(screen.getAllByText("45.0 kW of 40.0 kW")).toHaveLength(2);
-    expect(screen.getAllByText("5 minutes - 30 minutes duration, ~2 minutes to restore")).toHaveLength(2);
+    expect(screen.getAllByText("~1 minute to curtail, ~2 minutes to restore")).toHaveLength(2);
   });
 
   it("blocks submission while the API preview reports a blocking error", async () => {
@@ -751,7 +757,7 @@ describe("CurtailmentStartModal", () => {
 
     const secondaryPane = within(screen.getByTestId("secondary-pane"));
     expect(secondaryPane.getByText("Curtailment target reduction")).toBeInTheDocument();
-    expect(secondaryPane.getByText("5 minutes - 30 minutes duration, ~2 minutes to restore")).toBeInTheDocument();
+    expect(secondaryPane.getByText("~1 minute to curtail, ~2 minutes to restore")).toBeInTheDocument();
 
     rerender(
       <CurtailmentStartModal

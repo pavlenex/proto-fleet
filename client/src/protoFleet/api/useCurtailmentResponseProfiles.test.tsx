@@ -46,15 +46,13 @@ vi.mock("@/protoFleet/store", () => ({
   }),
 }));
 
-const siteLabelsById = new Map([["101", "Austin, TX"]]);
-
 const fixedKwFormValues: ResponseProfileFormValues = {
   name: "Partial reduction",
   actionType: "fixedKwReduction",
   targetKw: "2000",
   deviceIdentifiers: [],
-  siteId: "101",
-  siteName: "Austin, TX",
+  siteId: "",
+  siteName: "",
   selectionStrategy: "leastEfficientFirst",
   restoreBehavior: "automaticImmediateRestore",
   minDurationSec: "",
@@ -102,7 +100,7 @@ describe("useCurtailmentResponseProfiles", () => {
   it("lists and maps response profiles for the settings cards", async () => {
     mockListCurtailmentResponseProfiles.mockResolvedValueOnce({ profiles: [apiProfile()] });
 
-    const { result } = renderHook(() => useCurtailmentResponseProfiles(false, siteLabelsById));
+    const { result } = renderHook(() => useCurtailmentResponseProfiles(false));
 
     await act(async () => {
       await result.current.listResponseProfiles();
@@ -112,20 +110,25 @@ describe("useCurtailmentResponseProfiles", () => {
       id: "7",
       name: "Partial reduction",
       targetSummary: "2,000 kW target",
-      siteId: "101",
-      scope: "Austin, TX",
+      scope: "Site 101",
       restoreBehavior: "Restore immediately",
       deadlineSummary: "Within 15 min",
-      formValues: fixedKwFormValues,
+      formValues: {
+        ...fixedKwFormValues,
+        siteId: "101",
+        siteName: "Site 101",
+      },
     });
     expect(result.current.isLoading).toBe(false);
   });
 
   it("creates and updates profiles using the generated CRUD payload shape", async () => {
-    mockCreateCurtailmentResponseProfile.mockResolvedValueOnce({ profile: apiProfile() });
-    mockUpdateCurtailmentResponseProfile.mockResolvedValueOnce({ profile: apiProfile({ profileName: "Updated" }) });
+    mockCreateCurtailmentResponseProfile.mockResolvedValueOnce({ profile: apiProfile({ site: undefined }) });
+    mockUpdateCurtailmentResponseProfile.mockResolvedValueOnce({
+      profile: apiProfile({ profileName: "Updated", site: undefined }),
+    });
 
-    const { result } = renderHook(() => useCurtailmentResponseProfiles(false, siteLabelsById));
+    const { result } = renderHook(() => useCurtailmentResponseProfiles(false));
 
     await act(async () => {
       await result.current.createResponseProfile(fixedKwFormValues);
@@ -134,7 +137,6 @@ describe("useCurtailmentResponseProfiles", () => {
     expect(mockCreateCurtailmentResponseProfile).toHaveBeenCalledWith(
       expect.objectContaining({
         profileName: "Partial reduction",
-        site: expect.objectContaining({ siteId: 101n }),
         mode: CurtailmentMode.FIXED_KW,
         modeParams: expect.objectContaining({
           case: "fixedKw",
@@ -146,6 +148,7 @@ describe("useCurtailmentResponseProfiles", () => {
         restoreBatchIntervalSec: 0,
       }),
     );
+    expect(mockCreateCurtailmentResponseProfile.mock.calls[0]?.[0]?.site).toBeUndefined();
 
     await act(async () => {
       await result.current.updateResponseProfile("7", { ...fixedKwFormValues, name: "Updated" });
@@ -155,53 +158,39 @@ describe("useCurtailmentResponseProfiles", () => {
       expect.objectContaining({
         profileId: 7n,
         profileName: "Updated",
-        site: expect.objectContaining({ siteId: 101n }),
       }),
     );
+    expect(mockUpdateCurtailmentResponseProfile.mock.calls[0]?.[0]?.site).toBeUndefined();
   });
 
-  it("omits site from the CRUD payload when no site is selected", async () => {
+  it("preserves site in the CRUD payload when site values are present", async () => {
     mockCreateCurtailmentResponseProfile.mockResolvedValueOnce({ profile: apiProfile() });
-    const { result } = renderHook(() => useCurtailmentResponseProfiles(false, siteLabelsById));
+    mockUpdateCurtailmentResponseProfile.mockResolvedValueOnce({ profile: apiProfile({ profileName: "Updated" }) });
+    const { result } = renderHook(() => useCurtailmentResponseProfiles(false));
+    const siteScopedValues = {
+      ...fixedKwFormValues,
+      siteId: "101",
+      siteName: "Site 101",
+    };
 
     await act(async () => {
-      await result.current.createResponseProfile({
-        ...fixedKwFormValues,
-        siteId: "",
-        siteName: "",
-      });
+      await result.current.createResponseProfile(siteScopedValues);
     });
 
     const createRequest = mockCreateCurtailmentResponseProfile.mock.calls[0]?.[0];
     expect(createRequest).toEqual(expect.objectContaining({ profileName: "Partial reduction" }));
-    expect(createRequest?.site).toBeUndefined();
-  });
-
-  it("rejects invalid site IDs before creating a CRUD request", async () => {
-    const { result } = renderHook(() => useCurtailmentResponseProfiles(false, siteLabelsById));
-    let caughtError: unknown;
+    expect(createRequest?.site?.siteId).toBe(101n);
 
     await act(async () => {
-      try {
-        await result.current.createResponseProfile({
-          ...fixedKwFormValues,
-          siteId: "site-101",
-        });
-      } catch (error) {
-        caughtError = error;
-      }
+      await result.current.updateResponseProfile("7", { ...siteScopedValues, name: "Updated" });
     });
 
-    expect(caughtError).toEqual(
-      expect.objectContaining({
-        message: "Select a valid site before saving the response profile.",
-      }),
-    );
-    expect(result.current.createError).toBe("Select a valid site before saving the response profile.");
-    expect(mockCreateCurtailmentResponseProfile).not.toHaveBeenCalled();
+    const updateRequest = mockUpdateCurtailmentResponseProfile.mock.calls[0]?.[0];
+    expect(updateRequest).toEqual(expect.objectContaining({ profileId: 7n, profileName: "Updated" }));
+    expect(updateRequest?.site?.siteId).toBe(101n);
   });
 
-  it("keeps unresolved API sites as site-scoped profiles", async () => {
+  it("maps API profiles with sites as site-scoped profiles", async () => {
     mockListCurtailmentResponseProfiles.mockResolvedValueOnce({ profiles: [apiProfile()] });
 
     const { result } = renderHook(() => useCurtailmentResponseProfiles(false));
@@ -211,7 +200,6 @@ describe("useCurtailmentResponseProfiles", () => {
     });
 
     expect(result.current.responseProfiles[0]).toMatchObject({
-      siteId: "101",
       scope: "Site 101",
       formValues: expect.objectContaining({
         siteId: "101",
@@ -223,14 +211,13 @@ describe("useCurtailmentResponseProfiles", () => {
   it("maps API profiles without sites as whole-fleet profiles", async () => {
     mockListCurtailmentResponseProfiles.mockResolvedValueOnce({ profiles: [apiProfile({ site: undefined })] });
 
-    const { result } = renderHook(() => useCurtailmentResponseProfiles(false, siteLabelsById));
+    const { result } = renderHook(() => useCurtailmentResponseProfiles(false));
 
     await act(async () => {
       await result.current.listResponseProfiles();
     });
 
     expect(result.current.responseProfiles[0]).toMatchObject({
-      siteId: "",
       scope: "Whole fleet",
       formValues: expect.objectContaining({
         siteId: "",
@@ -239,16 +226,42 @@ describe("useCurtailmentResponseProfiles", () => {
     });
   });
 
-  it("does not preserve submitted miner selections for API-backed response profiles", async () => {
-    mockCreateCurtailmentResponseProfile.mockResolvedValueOnce({ profile: apiProfile() });
-    mockListCurtailmentResponseProfiles.mockResolvedValueOnce({ profiles: [apiProfile()] });
-    const { result } = renderHook(() => useCurtailmentResponseProfiles(false, siteLabelsById));
+  it("maps full-fleet API mode to the whole-fleet card scope", async () => {
+    mockListCurtailmentResponseProfiles.mockResolvedValueOnce({
+      profiles: [
+        apiProfile({
+          mode: CurtailmentMode.FULL_FLEET,
+          modeParams: { case: undefined },
+          site: undefined,
+        }),
+      ],
+    });
+
+    const { result } = renderHook(() => useCurtailmentResponseProfiles(false));
 
     await act(async () => {
-      await result.current.createResponseProfile({
-        ...fixedKwFormValues,
-        deviceIdentifiers: ["miner-1", "miner-2", "miner-3"],
-      });
+      await result.current.listResponseProfiles();
+    });
+
+    expect(result.current.responseProfiles[0]).toMatchObject({
+      targetSummary: "100% reduction",
+      scope: "Whole fleet",
+    });
+  });
+
+  it("drops submitted miner selections for API-backed response profiles", async () => {
+    mockCreateCurtailmentResponseProfile.mockResolvedValueOnce({ profile: apiProfile({ site: undefined }) });
+    mockListCurtailmentResponseProfiles.mockResolvedValueOnce({ profiles: [apiProfile({ site: undefined })] });
+    const { result } = renderHook(() => useCurtailmentResponseProfiles(false));
+    const minerScopedValues = {
+      ...fixedKwFormValues,
+      deviceIdentifiers: ["miner-1", "miner-2", "miner-3"],
+      siteId: "",
+      siteName: "",
+    };
+
+    await act(async () => {
+      await result.current.createResponseProfile(minerScopedValues);
     });
 
     await act(async () => {
@@ -256,9 +269,11 @@ describe("useCurtailmentResponseProfiles", () => {
     });
 
     expect(result.current.responseProfiles[0]).toMatchObject({
-      scope: "Austin, TX",
+      scope: "Whole fleet",
       formValues: expect.objectContaining({
         deviceIdentifiers: [],
+        siteId: "",
+        siteName: "",
       }),
     });
   });
@@ -266,7 +281,7 @@ describe("useCurtailmentResponseProfiles", () => {
   it("deletes response profiles by id", async () => {
     mockDeleteCurtailmentResponseProfile.mockResolvedValueOnce({});
 
-    const { result } = renderHook(() => useCurtailmentResponseProfiles(false, siteLabelsById));
+    const { result } = renderHook(() => useCurtailmentResponseProfiles(false));
 
     await act(async () => {
       await result.current.deleteResponseProfile("7");

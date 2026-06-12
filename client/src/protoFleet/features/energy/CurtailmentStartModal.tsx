@@ -174,15 +174,63 @@ const curtailmentModeOptions = [
   { value: "fullFleet", label: "Full shutdown" },
 ];
 
+function withWholeFleetScope(values: CurtailmentFormValues): CurtailmentFormValues {
+  return {
+    ...values,
+    scopeType: "wholeOrg",
+    scopeId: "whole-org",
+    siteId: "",
+    deviceSetIds: [],
+    deviceIdentifiers: [],
+  };
+}
+
+function withResponseProfileScope(
+  values: CurtailmentFormValues,
+  responseProfileMode: ResponseProfileModalMode,
+): CurtailmentFormValues {
+  if (responseProfileMode === "edit" && values.scopeType === "site" && values.siteId) {
+    return {
+      ...values,
+      scopeType: "site",
+      scopeId: values.scopeId ?? `Site ${values.siteId}`,
+      deviceSetIds: [],
+      deviceIdentifiers: [],
+    };
+  }
+
+  return withWholeFleetScope(values);
+}
+
+function removeScopeValues(
+  values: CurtailmentResponseProfileOption["values"],
+): CurtailmentResponseProfileOption["values"] {
+  const behaviorValues = { ...values };
+
+  delete behaviorValues.scopeType;
+  delete behaviorValues.scopeId;
+  delete behaviorValues.siteId;
+  delete behaviorValues.deviceSetIds;
+  delete behaviorValues.deviceIdentifiers;
+
+  return behaviorValues;
+}
+
 function isCurtailmentMode(value: string): value is CurtailmentMode {
   return value === "fixedKwReduction" || value === "fullFleet";
 }
 
-function getInitialValues(initialValues?: Partial<CurtailmentFormValues>): CurtailmentFormValues {
-  return {
+function getInitialValues(
+  initialValues?: Partial<CurtailmentFormValues>,
+  variant: CurtailmentStartModalVariant = "curtailment",
+  responseProfileMode: ResponseProfileModalMode = "create",
+): CurtailmentFormValues {
+  const values = {
     ...defaultValues,
     ...initialValues,
   };
+
+  return variant === "responseProfile" ? withResponseProfileScope(values, responseProfileMode) : values;
 }
 
 function parseRequiredPositiveNumberField(value: string, fieldLabel: string): ParsedNumberField {
@@ -445,7 +493,7 @@ function PreviewPane({ preview, previewError, isPreviewLoading = false }: Previe
             Curtail {preview.selectedMinerCount} miners {preview.scopeLabel} immediately
           </div>
           <div className="text-heading-100 text-text-primary-50">
-            {preview.curtailEstimate} duration, {preview.restoreEstimate} to restore
+            {preview.curtailEstimate} to curtail, {preview.restoreEstimate} to restore
           </div>
         </div>
       </div>
@@ -597,7 +645,9 @@ function CurtailmentStartModalContent({
   isTestingCurtailment = false,
   isDeleting = false,
 }: CurtailmentStartModalProps): ReactElement {
-  const [initialFormValues] = useState<CurtailmentFormValues>(() => getInitialValues(initialValues));
+  const [initialFormValues] = useState<CurtailmentFormValues>(() =>
+    getInitialValues(initialValues, variant, responseProfileMode),
+  );
   const [values, setValues] = useState<CurtailmentFormValues>(() => initialFormValues);
   const [showMaintenanceConfirmation, setShowMaintenanceConfirmation] = useState(false);
   const [maintenanceInclusionConfirmed, setMaintenanceInclusionConfirmed] = useState(false);
@@ -759,7 +809,7 @@ function CurtailmentStartModalContent({
     setMaintenanceInclusionConfirmed(false);
     setValues((current) => ({
       ...current,
-      ...responseProfile.values,
+      ...removeScopeValues(responseProfile.values),
       responseProfileId: responseProfile.id,
     }));
   };
