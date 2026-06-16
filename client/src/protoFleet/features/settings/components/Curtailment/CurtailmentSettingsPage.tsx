@@ -573,7 +573,7 @@ function SourcesEmptyState(): ReactElement {
 function SourcesLoadingState(): ReactElement {
   return (
     <div className="flex min-h-[220px] w-full items-center justify-center py-14">
-      <ProgressCircular indeterminate />
+      <ProgressCircular indeterminate dataTestId="curtailment-sources-loading" />
     </div>
   );
 }
@@ -605,7 +605,7 @@ function ResponseProfilesEmptyState(): ReactElement {
 function ResponseProfilesLoadingState(): ReactElement {
   return (
     <div className="flex min-h-[220px] w-full items-center justify-center py-14">
-      <ProgressCircular indeterminate />
+      <ProgressCircular indeterminate dataTestId="curtailment-response-profiles-loading" />
     </div>
   );
 }
@@ -631,13 +631,14 @@ type ResponseProfileCardProps = {
 function ResponseProfileCard({ profile, onEdit }: ResponseProfileCardProps): ReactElement {
   return (
     <Card
-      title={profile.name}
+      title={<span data-testid="response-profile-name">{profile.name}</span>}
       type={cardType.default}
       className="curtailment-response-profile-card bg-surface-elevated-base shadow-100"
       headerTone="neutral"
       headerClassName="items-start bg-surface-elevated-base px-6 pt-6 pb-0"
       titleClassName="truncate text-emphasis-300 leading-5 font-semibold text-text-primary"
       bodyClassName="px-6 pt-0 pb-1"
+      testId="response-profile-card"
       headerAction={
         <Button
           variant={variants.secondary}
