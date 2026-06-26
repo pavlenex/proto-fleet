@@ -69,6 +69,36 @@ JOIN device d ON d.org_id = ce.org_id
             ce.scope_type = 'site'
             AND d.site_id = (ce.scope_jsonb->>'site_id')::BIGINT
         )
+        OR (
+            ce.scope_type = 'mixed'
+            AND d.site_id IN (
+                SELECT mixed_site.site_id::BIGINT
+                FROM jsonb_array_elements_text(
+                    CASE WHEN jsonb_typeof(ce.scope_jsonb->'site_ids') = 'array'
+                      THEN ce.scope_jsonb->'site_ids'
+                      ELSE '[]'::jsonb
+                    END
+                ) AS mixed_site(site_id)
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements_text(
+                    CASE WHEN jsonb_typeof(ce.scope_jsonb->'device_identifiers') = 'array'
+                      THEN ce.scope_jsonb->'device_identifiers'
+                      ELSE '[]'::jsonb
+                    END
+                ) AS mixed_device(device_identifier)
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements_text(
+                    CASE WHEN jsonb_typeof(ce.scope_jsonb->'device_set_ids') = 'array'
+                      THEN ce.scope_jsonb->'device_set_ids'
+                      ELSE '[]'::jsonb
+                    END
+                ) AS mixed_device_set(device_set_id)
+            )
+        )
     )
 WHERE ce.org_id = sqlc.arg('org_id')
     AND ce.state IN ('pending', 'active', 'restoring')
@@ -112,9 +142,8 @@ WITH scoped_devices AS MATERIALIZED (
     FROM device d
     WHERE d.org_id = sqlc.arg('org_id')
         AND d.deleted_at IS NULL
-        AND sqlc.narg('device_identifiers')::text[] IS NULL
-        AND sqlc.narg('site_id')::BIGINT IS NOT NULL
-        AND d.site_id = sqlc.narg('site_id')::BIGINT
+        AND sqlc.narg('site_ids')::BIGINT[] IS NOT NULL
+        AND d.site_id = ANY(sqlc.narg('site_ids')::BIGINT[])
 )
 SELECT DISTINCT ct.device_identifier
 FROM scoped_devices sd
@@ -553,9 +582,9 @@ WHERE sqlc.arg('cooldown_sec')::INT <= 0
 SELECT pg_advisory_xact_lock(hashtextextended('curtailment_scope:' || sqlc.arg('org_id')::text, 0));
 
 -- name: CountCurtailmentScopeConflicts :one
--- Hierarchy for currently supported scopes: org > site.
--- A new whole-org event conflicts with existing whole-org or site events.
--- A new site event conflicts with existing whole-org or same-site events.
+-- Hierarchy for currently supported closed-loop scopes: org > site.
+-- A new whole-org event conflicts with existing whole-org, site, or site-only mixed events.
+-- A new site or site-only mixed event conflicts with existing whole-org or overlapping site ownership.
 SELECT count(*)::BIGINT
 FROM curtailment_event
 WHERE org_id = sqlc.arg('org_id')
@@ -567,15 +596,63 @@ WHERE org_id = sqlc.arg('org_id')
   AND (
     (
       sqlc.arg('scope_type')::TEXT = 'whole_org'
-      AND scope_type IN ('whole_org', 'site')
+      AND (
+        scope_type IN ('whole_org', 'site')
+        OR (
+          scope_type = 'mixed'
+          AND jsonb_array_length(
+            CASE WHEN jsonb_typeof(scope_jsonb->'site_ids') = 'array'
+              THEN scope_jsonb->'site_ids'
+              ELSE '[]'::jsonb
+            END
+          ) > 0
+          AND jsonb_array_length(
+            CASE WHEN jsonb_typeof(scope_jsonb->'device_identifiers') = 'array'
+              THEN scope_jsonb->'device_identifiers'
+              ELSE '[]'::jsonb
+            END
+          ) = 0
+          AND jsonb_array_length(
+            CASE WHEN jsonb_typeof(scope_jsonb->'device_set_ids') = 'array'
+              THEN scope_jsonb->'device_set_ids'
+              ELSE '[]'::jsonb
+            END
+          ) = 0
+        )
+      )
     )
     OR (
-      sqlc.arg('scope_type')::TEXT = 'site'
+      sqlc.arg('scope_type')::TEXT IN ('site', 'mixed')
       AND (
         scope_type = 'whole_org'
         OR (
           scope_type = 'site'
-          AND scope_jsonb->>'site_id' = sqlc.arg('site_id')::TEXT
+          AND (scope_jsonb->>'site_id')::BIGINT = ANY(sqlc.arg('site_ids')::BIGINT[])
+        )
+        OR (
+          scope_type = 'mixed'
+          AND jsonb_array_length(
+            CASE WHEN jsonb_typeof(scope_jsonb->'device_identifiers') = 'array'
+              THEN scope_jsonb->'device_identifiers'
+              ELSE '[]'::jsonb
+            END
+          ) = 0
+          AND jsonb_array_length(
+            CASE WHEN jsonb_typeof(scope_jsonb->'device_set_ids') = 'array'
+              THEN scope_jsonb->'device_set_ids'
+              ELSE '[]'::jsonb
+            END
+          ) = 0
+          AND EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(
+              CASE WHEN jsonb_typeof(scope_jsonb->'site_ids') = 'array'
+                THEN scope_jsonb->'site_ids'
+                ELSE '[]'::jsonb
+              END
+            ) AS existing_site_id(site_id)
+            WHERE existing_site_id.site_id::BIGINT = ANY(sqlc.arg('site_ids')::BIGINT[])
+          )
         )
       )
     )
@@ -942,7 +1019,7 @@ SET last_tick_at          = EXCLUDED.last_tick_at,
 -- name: ListCurtailmentCandidatesByOrg :many
 -- Per-device state for the selector. Returns every in-scope device;
 -- service applies skip-reason attribution. nil power/hash = stale
--- (15-min window). device_identifiers nil = whole-org.
+-- (15-min window). site_ids and device_identifiers nil = whole-org.
 WITH latest_metrics AS (
     SELECT DISTINCT ON (device_metrics.device_identifier)
         device_metrics.device_identifier,
@@ -990,12 +1067,15 @@ LEFT JOIN latest_hourly lh ON lh.device_identifier = d.device_identifier
 WHERE d.org_id = sqlc.arg('org_id')
     AND d.deleted_at IS NULL
     AND (
-        sqlc.narg('site_id')::bigint IS NULL
-        OR d.site_id = sqlc.narg('site_id')::bigint
-    )
-    AND (
-        sqlc.narg('device_identifiers')::text[] IS NULL
-        OR d.device_identifier = ANY(sqlc.narg('device_identifiers')::text[])
+        (sqlc.narg('site_ids')::BIGINT[] IS NULL AND sqlc.narg('device_identifiers')::text[] IS NULL)
+        OR (
+            sqlc.narg('site_ids')::BIGINT[] IS NOT NULL
+            AND d.site_id = ANY(sqlc.narg('site_ids')::BIGINT[])
+        )
+        OR (
+            sqlc.narg('device_identifiers')::text[] IS NOT NULL
+            AND d.device_identifier = ANY(sqlc.narg('device_identifiers')::text[])
+        )
     )
 -- Stable order so the selector's stable sort is deterministic on ties.
 ORDER BY d.device_identifier;

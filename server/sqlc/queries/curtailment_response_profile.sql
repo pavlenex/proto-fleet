@@ -10,11 +10,20 @@ FROM curtailment_response_profile
 WHERE id = sqlc.arg('id')
   AND org_id = sqlc.arg('org_id');
 
+-- name: ListCurtailmentResponseProfileDeviceSitesByOrg :many
+SELECT device_identifier, site_id
+FROM device
+WHERE org_id = sqlc.arg('org_id')
+  AND device_identifier = ANY(sqlc.arg('device_identifiers')::text[])
+  AND deleted_at IS NULL
+ORDER BY device_identifier;
+
 -- name: InsertCurtailmentResponseProfile :one
 INSERT INTO curtailment_response_profile (
     org_id,
     profile_name,
     site_id,
+    scope_json,
     mode,
     strategy,
     level,
@@ -32,6 +41,7 @@ INSERT INTO curtailment_response_profile (
     sqlc.arg('org_id'),
     sqlc.arg('profile_name'),
     sqlc.narg('site_id'),
+    sqlc.arg('scope_json'),
     sqlc.arg('mode'),
     sqlc.arg('strategy'),
     sqlc.arg('level'),
@@ -53,6 +63,7 @@ UPDATE curtailment_response_profile
 SET
     profile_name = sqlc.arg('profile_name'),
     site_id = sqlc.narg('site_id'),
+    scope_json = sqlc.arg('scope_json'),
     mode = sqlc.arg('mode'),
     strategy = sqlc.arg('strategy'),
     level = sqlc.arg('level'),
@@ -69,10 +80,12 @@ SET
 WHERE id = sqlc.arg('id')
   AND org_id = sqlc.arg('org_id')
   AND site_id IS NOT DISTINCT FROM sqlc.narg('expected_site_id')
+  AND scope_json = sqlc.arg('expected_scope_json')::jsonb
 RETURNING *;
 
 -- name: DeleteCurtailmentResponseProfileByOrg :execrows
 DELETE FROM curtailment_response_profile
 WHERE id = sqlc.arg('id')
   AND org_id = sqlc.arg('org_id')
-  AND site_id IS NOT DISTINCT FROM sqlc.narg('expected_site_id');
+  AND site_id IS NOT DISTINCT FROM sqlc.narg('expected_site_id')
+  AND scope_json = sqlc.arg('expected_scope_json')::jsonb;

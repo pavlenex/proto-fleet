@@ -946,8 +946,8 @@ const ScheduleModal = ({
           selectedMinerIds={values.minerTargetIds}
           scope={scope}
           onDismiss={() => setShowMinerSelectionModal(false)}
-          onSave={(minerTargetIds) => {
-            setNextValues((current) => ({ ...current, minerTargetIds }));
+          onSave={(selection) => {
+            setNextValues((current) => ({ ...current, minerTargetIds: selection.selectedMinerIds }));
             setShowMinerSelectionModal(false);
           }}
         />

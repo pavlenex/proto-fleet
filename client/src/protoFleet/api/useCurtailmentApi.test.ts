@@ -16,10 +16,12 @@ import {
   CurtailmentEventState,
   CurtailmentMode,
   CurtailmentPriority,
+  CurtailmentScopeSchema,
   CurtailmentTargetRollupSchema,
   CurtailmentTargetSchema,
   CurtailmentTargetState,
   FixedKwParamsSchema,
+  ScopeDeviceListSchema,
   ScopeSiteSchema,
   ScopeWholeOrgSchema,
 } from "@/protoFleet/api/generated/curtailment/v1/curtailment_pb";
@@ -373,6 +375,51 @@ describe("useCurtailmentApi", () => {
     expect(result.current.historyEvents[0]).toEqual(
       expect.objectContaining({
         scopeLabel: "Austin, TX",
+      }),
+    );
+  });
+
+  it("uses combined scope labels for mixed site and miner active and history events", async () => {
+    const mixedScopedEvent = curtailmentEvent({
+      scopes: [
+        create(CurtailmentScopeSchema, {
+          scope: { case: "site", value: create(ScopeSiteSchema, { siteId: 101n }) },
+        }),
+        create(CurtailmentScopeSchema, {
+          scope: {
+            case: "deviceIdentifiers",
+            value: create(ScopeDeviceListSchema, { deviceIdentifiers: ["miner-1"] }),
+          },
+        }),
+      ],
+    });
+    mockListActiveCurtailments.mockResolvedValueOnce({ event: mixedScopedEvent });
+    mockListCurtailmentEvents.mockResolvedValueOnce({ events: [mixedScopedEvent], nextPageToken: "" });
+    const siteNameById = new Map([["101", "Calgary"]]);
+
+    const { result } = renderHook(() => useCurtailmentApi({ siteNameById }));
+
+    await act(async () => {
+      await result.current.refreshCurtailment();
+    });
+
+    expect(result.current.activeEvent).toEqual(
+      expect.objectContaining({
+        scopeLabel: "Calgary + 1 miner",
+      }),
+    );
+    expect(result.current.activeEventFormValues).toEqual(
+      expect.objectContaining({
+        scopeType: "explicitMiners",
+        scopeId: "Calgary",
+        siteSelection: "site",
+        siteId: "101",
+        deviceIdentifiers: ["miner-1"],
+      }),
+    );
+    expect(result.current.historyEvents[0]).toEqual(
+      expect.objectContaining({
+        scopeLabel: "Calgary + 1 miner",
       }),
     );
   });
@@ -1203,6 +1250,70 @@ describe("useCurtailmentApi", () => {
     expect(result.current.activeEventId).toBe("curt-new-active");
     expect(result.current.activeEvent?.reason).toBe("New active event");
     expect(result.current.activeEvents.map((event) => event.id)).toEqual(["curt-previous-active", "curt-new-active"]);
+  });
+
+  it("keeps a newly started pending curtailment visible while active and history refreshes are stale", async () => {
+    const startedEvent = curtailmentEvent({
+      eventUuid: "curt-new-pending",
+      reason: "New pending event",
+      state: CurtailmentEventState.PENDING,
+      decisionSnapshot: {
+        estimated_reduction_kw: 6.6,
+        selected_count: 2,
+      },
+      targetRollup: create(CurtailmentTargetRollupSchema, {
+        pending: 2,
+        total: 2,
+      }),
+    });
+    const olderHistoryEvent = curtailmentEvent({
+      eventUuid: "curt-yesterday",
+      reason: "Older completed event",
+      state: CurtailmentEventState.COMPLETED,
+      endedAt: timestamp("2026-04-30T13:00:00Z"),
+    });
+    mockStartCurtailment.mockResolvedValueOnce({ event: startedEvent });
+    mockListActiveCurtailments.mockResolvedValue({ event: undefined });
+    mockListCurtailmentEvents.mockResolvedValue({ events: [olderHistoryEvent], nextPageToken: "" });
+
+    const { result } = renderHook(() => useCurtailmentApi());
+
+    await act(async () => {
+      await result.current.startCurtailment(baseSubmitValues);
+    });
+
+    expect(result.current.activeEventId).toBe("curt-new-pending");
+    expect(result.current.activeEvent).toEqual(
+      expect.objectContaining({
+        reason: "New pending event",
+        state: "pending",
+        selectedMiners: 2,
+        estimatedReductionKw: 6.6,
+        targetKw: 5,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.refreshCurtailment({ background: true });
+    });
+    await act(async () => {
+      await result.current.refreshCurtailment({ background: true });
+    });
+    await act(async () => {
+      await result.current.refreshCurtailment({ background: true });
+    });
+
+    expect(result.current.activeEventId).toBe("curt-new-pending");
+    expect(result.current.activeEvent).toEqual(
+      expect.objectContaining({
+        reason: "New pending event",
+        state: "pending",
+        selectedMiners: 2,
+        estimatedReductionKw: 6.6,
+        targetKw: 5,
+      }),
+    );
+    expect(result.current.historyEvents.map((event) => event.id)).toEqual(["curt-new-pending", "curt-yesterday"]);
   });
 
   it("removes a failed mutation event without clearing unrelated active curtailments", async () => {

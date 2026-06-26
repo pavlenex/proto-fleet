@@ -55,6 +55,33 @@ func TestResponseProfileService_CreatePersistsSiteScopedFixedKW(t *testing.T) {
 	assert.Equal(t, int32(600), store.created.PostEventCooldownSec)
 }
 
+func TestResponseProfileService_CreatePersistsCompositeSiteAndMinerScope(t *testing.T) {
+	t.Parallel()
+
+	targetKW := 2500.0
+	store := newResponseProfileFakeStore()
+	svc := NewResponseProfileService(store)
+
+	profile, err := svc.Create(t.Context(), SaveResponseProfileRequest{
+		Profile: models.ResponseProfile{
+			OrgID:       42,
+			ProfileName: "Combined shed",
+			Mode:        models.ModeFixedKw,
+			TargetKW:    &targetKW,
+			ScopeJSON:   []byte(`{"site_ids":[7,7],"device_identifiers":["miner-a","miner-a","miner-b"]}`),
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, profile)
+	assert.Nil(t, profile.SiteID, "mixed scopes must not masquerade as legacy single-site profiles")
+	assert.Equal(t, 1, store.siteCheckCount, "sites are validated by id without expanding site miners")
+	assert.Equal(t, int64(7), store.siteCheckSiteID)
+	assert.JSONEq(t, `{"site_ids":[7],"device_identifiers":["miner-a","miner-b"]}`, string(profile.ScopeJSON))
+	require.NotNil(t, store.created)
+	assert.JSONEq(t, `{"site_ids":[7],"device_identifiers":["miner-a","miner-b"]}`, string(store.created.ScopeJSON))
+}
+
 func TestResponseProfileService_CreateAllowsWholeOrgScope(t *testing.T) {
 	t.Parallel()
 
@@ -75,6 +102,25 @@ func TestResponseProfileService_CreateAllowsWholeOrgScope(t *testing.T) {
 	require.NotNil(t, profile)
 	assert.Nil(t, profile.SiteID)
 	assert.Equal(t, 0, store.siteCheckCount)
+}
+
+func TestResponseProfileService_CreateRejectsDeviceSetScope(t *testing.T) {
+	t.Parallel()
+
+	targetKW := 2500.0
+	_, err := NewResponseProfileService(newResponseProfileFakeStore()).Create(t.Context(), SaveResponseProfileRequest{
+		Profile: models.ResponseProfile{
+			OrgID:       42,
+			ProfileName: "Device set shed",
+			Mode:        models.ModeFixedKw,
+			TargetKW:    &targetKW,
+			ScopeJSON:   []byte(`{"device_set_ids":["set-a"]}`),
+		},
+	})
+
+	require.Error(t, err)
+	assert.True(t, fleeterror.IsUnimplementedError(err))
+	assert.Contains(t, err.Error(), "device-set scope is not implemented")
 }
 
 func TestResponseProfileService_CreateAppliesBackendBatchDefaultsWithoutOverwritingImmediateRestore(t *testing.T) {
@@ -319,7 +365,7 @@ func TestResponseProfileService_DeleteRejectsReferencedProfile(t *testing.T) {
 	store.automationRuleCount = 1
 	svc := NewResponseProfileService(store)
 
-	err := svc.Delete(t.Context(), 42, 101, nil)
+	err := svc.Delete(t.Context(), 42, 101, nil, nil)
 
 	require.Error(t, err)
 	assert.True(t, fleeterror.IsFailedPreconditionError(err))
@@ -358,18 +404,22 @@ func (s *responseProfileFakeStore) GetResponseProfile(_ context.Context, _ int64
 	return nil, fleeterror.NewNotFoundErrorf("curtailment response profile not found: %d", profileID)
 }
 
+func (*responseProfileFakeStore) ListResponseProfileDeviceSites(context.Context, int64, []string) (map[string]*int64, error) {
+	return map[string]*int64{}, nil
+}
+
 func (s *responseProfileFakeStore) CreateResponseProfile(_ context.Context, profile models.ResponseProfile) (*models.ResponseProfile, error) {
 	profile.ID = 101
 	s.created = &profile
 	return &profile, nil
 }
 
-func (s *responseProfileFakeStore) UpdateResponseProfile(_ context.Context, profile models.ResponseProfile, _ *int64) (*models.ResponseProfile, error) {
+func (s *responseProfileFakeStore) UpdateResponseProfile(_ context.Context, profile models.ResponseProfile, _ *int64, _ []byte) (*models.ResponseProfile, error) {
 	s.updated = &profile
 	return &profile, nil
 }
 
-func (s *responseProfileFakeStore) DeleteResponseProfile(context.Context, int64, int64, *int64) error {
+func (s *responseProfileFakeStore) DeleteResponseProfile(context.Context, int64, int64, *int64, []byte) error {
 	s.deleteCalls++
 	return nil
 }

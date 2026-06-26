@@ -9,10 +9,12 @@ import CurtailmentManagementPanel from "@/protoFleet/features/energy/Curtailment
 import type {
   CurtailmentPlanPreview,
   CurtailmentResponseProfileOption,
+  CurtailmentSiteOption,
   CurtailmentSubmitValues,
 } from "@/protoFleet/features/energy/CurtailmentStartModal";
 
 const mocks = vi.hoisted(() => ({
+  activeSite: { current: { kind: "all" } as { kind: string; id?: string; slug?: string } },
   adminTerminateCurtailment: vi.fn(),
   dismissTerminalCurtailment: vi.fn(),
   forceReleaseCurtailment: vi.fn(),
@@ -45,6 +47,10 @@ vi.mock("@/protoFleet/api/sites", () => ({
   useSites: () => ({
     listSites: mocks.listSites,
   }),
+}));
+
+vi.mock("@/protoFleet/components/PageHeader/SitePicker", () => ({
+  useActiveSite: () => ({ activeSite: mocks.activeSite.current, setActiveSite: vi.fn() }),
 }));
 
 vi.mock("@/protoFleet/store", () => ({
@@ -189,6 +195,21 @@ vi.mock("@/protoFleet/features/energy/CurtailmentHistory", () => ({
 }));
 
 vi.mock("@/protoFleet/features/energy/CurtailmentStartModal", () => ({
+  getDefaultCurtailmentSiteScope: (
+    activeSite: { kind: string; id?: string },
+    siteOptions: CurtailmentSiteOption[] = [],
+  ) => {
+    if (activeSite.kind !== "site" || !activeSite.id) {
+      return undefined;
+    }
+
+    return (
+      siteOptions.find((siteOption) => siteOption.id === activeSite.id) ?? {
+        id: activeSite.id,
+        name: `Site ${activeSite.id}`,
+      }
+    );
+  },
   default: ({
     initialValues,
     mode,
@@ -196,6 +217,8 @@ vi.mock("@/protoFleet/features/energy/CurtailmentStartModal", () => ({
     onSubmit,
     preview,
     responseProfiles,
+    siteOptions,
+    defaultSiteScope,
   }: {
     initialValues?: Partial<CurtailmentSubmitValues>;
     mode?: string;
@@ -203,11 +226,15 @@ vi.mock("@/protoFleet/features/energy/CurtailmentStartModal", () => ({
     onSubmit: (values: CurtailmentSubmitValues) => void;
     preview?: CurtailmentPlanPreview;
     responseProfiles?: CurtailmentResponseProfileOption[];
+    siteOptions?: CurtailmentSiteOption[];
+    defaultSiteScope?: CurtailmentSiteOption;
   }) => (
     <div role="dialog" aria-label={mode === "edit" ? "Manage curtailment" : "New curtailment"}>
       <div data-testid="modal-initial-reason">{initialValues?.reason ?? ""}</div>
       <div data-testid="modal-response-profiles">{responseProfiles?.map((profile) => profile.label).join(",")}</div>
       <div data-testid="modal-response-profile-values">{JSON.stringify(responseProfiles?.[0]?.values ?? {})}</div>
+      <div data-testid="modal-site-options">{siteOptions?.map((siteOption) => siteOption.name).join(",")}</div>
+      <div data-testid="modal-default-site-scope">{defaultSiteScope?.name ?? ""}</div>
       <div data-testid="modal-preview">
         {preview
           ? `${preview.selectedMinerCount} miners, ${preview.targetKw} kW target, ${preview.estimatedReductionKw} kW estimated`
@@ -316,6 +343,7 @@ function createApiResult(overrides: Partial<UseCurtailmentApiResult> = {}): UseC
 describe("CurtailmentManagementPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.activeSite.current = { kind: "all" };
     mocks.listSites.mockImplementation(({ onSuccess, onFinally } = {}) => {
       onSuccess?.([{ site: { id: 101n, name: "Austin, TX" } }]);
       onFinally?.();
@@ -351,6 +379,7 @@ describe("CurtailmentManagementPanel", () => {
   });
 
   it("loads site names and passes them to curtailment hooks when the operator can read sites", async () => {
+    const user = userEvent.setup();
     mocks.useHasPermission.mockImplementation((key: string) => key === "site:read");
 
     render(<CurtailmentManagementPanel />);
@@ -368,6 +397,23 @@ describe("CurtailmentManagementPanel", () => {
       expect(apiOptions?.siteNameById?.get("101")).toBe("Austin, TX");
       expect(responseProfileOptions?.siteNameById?.get("101")).toBe("Austin, TX");
     });
+
+    await user.click(screen.getByRole("button", { name: "Run curtailment" }));
+
+    expect(screen.getByTestId("modal-site-options")).toHaveTextContent("Austin, TX");
+  });
+
+  it("passes the globally selected site as the default site scope for new curtailment runs", async () => {
+    const user = userEvent.setup();
+    mocks.activeSite.current = { kind: "site", id: "101", slug: "austin" };
+    mocks.useHasPermission.mockImplementation((key: string) => key === "site:read");
+
+    render(<CurtailmentManagementPanel />);
+
+    await waitFor(() => expect(mocks.listSites).toHaveBeenCalled());
+    await user.click(screen.getByRole("button", { name: "Run curtailment" }));
+
+    expect(screen.getByTestId("modal-default-site-scope")).toHaveTextContent("Austin, TX");
   });
 
   it("submits planned curtailments, closes the modal, and passes refreshed history props through", async () => {
@@ -463,11 +509,69 @@ describe("CurtailmentManagementPanel", () => {
     await user.click(screen.getByRole("button", { name: "Run curtailment" }));
 
     expect(screen.getByTestId("modal-response-profiles")).toHaveTextContent("Standard shed");
-    expect(screen.getByTestId("modal-response-profile-values")).toHaveTextContent('"scopeType":"site"');
+    expect(screen.getByTestId("modal-response-profile-values")).toHaveTextContent('"scopeType":"explicitMiners"');
     expect(screen.getByTestId("modal-response-profile-values")).toHaveTextContent('"scopeId":"Austin, TX"');
+    expect(screen.getByTestId("modal-response-profile-values")).toHaveTextContent('"siteSelection":"site"');
     expect(screen.getByTestId("modal-response-profile-values")).toHaveTextContent('"siteId":"101"');
-    expect(screen.getByTestId("modal-response-profile-values")).toHaveTextContent('"deviceIdentifiers":[]');
+    expect(screen.getByTestId("modal-response-profile-values")).toHaveTextContent(
+      '"deviceIdentifiers":["miner-1","miner-2","miner-3"]',
+    );
     expect(screen.getByTestId("modal-response-profile-values")).toHaveTextContent('"targetKw":"50"');
+  });
+
+  it("passes miner-scoped response profiles to the plan modal", async () => {
+    const user = userEvent.setup();
+    mocks.useCurtailmentResponseProfiles.mockReturnValue({
+      responseProfiles: [
+        {
+          id: "profile-1",
+          name: "Targeted shed",
+          targetSummary: "50 kW target",
+          scope: "3 miners",
+          selectionStrategy: "Least efficient first",
+          restoreBehavior: "Restore in batches",
+          deadlineSummary: "Within 15 min",
+          formValues: {
+            name: "Targeted shed",
+            actionType: "fixedKwReduction",
+            targetKw: "50",
+            deviceIdentifiers: ["miner-1", "miner-2", "miner-3"],
+            siteId: "",
+            siteName: "",
+            selectionStrategy: "leastEfficientFirst",
+            restoreBehavior: "automaticBatchRestore",
+            minDurationSec: "300",
+            maxDurationSec: "900",
+            curtailBatchSize: "20",
+            curtailBatchIntervalSec: "60",
+            restoreBatchSize: "10",
+            restoreIntervalSec: "120",
+            responseDeadlineMinutes: "15",
+            includeMaintenance: true,
+          },
+        },
+      ],
+      isLoading: false,
+      isCreating: false,
+      updatingProfileIds: new Set(),
+      loadError: null,
+      createError: null,
+      listResponseProfiles: vi.fn(),
+      createResponseProfile: vi.fn(),
+      updateResponseProfile: vi.fn(),
+      deleteResponseProfile: vi.fn(),
+    });
+
+    render(<CurtailmentManagementPanel />);
+
+    await user.click(screen.getByRole("button", { name: "Run curtailment" }));
+
+    expect(screen.getByTestId("modal-response-profiles")).toHaveTextContent("Targeted shed");
+    expect(screen.getByTestId("modal-response-profile-values")).toHaveTextContent('"scopeType":"explicitMiners"');
+    expect(screen.getByTestId("modal-response-profile-values")).toHaveTextContent(
+      '"deviceIdentifiers":["miner-1","miner-2","miner-3"]',
+    );
+    expect(screen.getByTestId("modal-response-profile-values")).toHaveTextContent('"siteId":""');
   });
 
   it("opens a new plan while a curtailment is already active", async () => {

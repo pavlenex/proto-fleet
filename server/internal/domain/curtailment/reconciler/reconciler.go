@@ -771,7 +771,7 @@ func (r *Reconciler) claimClosedLoopFullFleetTargets(ctx context.Context, ev *mo
 				OrgID:             ev.OrgID,
 				CooldownSec:       cooldownSec,
 				DeviceIdentifiers: params.DeviceIdentifiers,
-				SiteID:            params.SiteID,
+				SiteIDs:           params.SiteIDs,
 			},
 		)
 		if err != nil {
@@ -893,7 +893,13 @@ func listCandidatesParamsForEventScope(ev *models.Event) (interfaces.ListCandida
 		if err := json.Unmarshal(ev.ScopeJSON, &scope); err != nil || scope.SiteID <= 0 {
 			return interfaces.ListCandidatesParams{}, false
 		}
-		return interfaces.ListCandidatesParams{SiteID: &scope.SiteID}, true
+		return interfaces.ListCandidatesParams{SiteIDs: []int64{scope.SiteID}}, true
+	case models.ScopeTypeMixed:
+		scope, hasScope, err := curtailment.ScopeFromJSON(ev.ScopeJSON)
+		if err != nil || !hasScope || !curtailment.IsSiteOnlyScope(scope) {
+			return interfaces.ListCandidatesParams{}, false
+		}
+		return interfaces.ListCandidatesParams{SiteIDs: scope.SiteIDs}, true
 	case models.ScopeTypeDeviceSets, models.ScopeTypeDeviceList:
 		return interfaces.ListCandidatesParams{}, false
 	default:

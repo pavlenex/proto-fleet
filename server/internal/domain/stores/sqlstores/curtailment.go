@@ -103,10 +103,16 @@ func (s *SQLCurtailmentStore) ListRecentlyResolvedCurtailedDevices(
 	ctx context.Context,
 	params interfaces.ListRecentlyResolvedCurtailedDevicesParams,
 ) ([]string, error) {
-	if params.SiteID != nil || len(params.DeviceIdentifiers) > 0 {
+	if len(params.SiteIDs) > 0 || len(params.DeviceIdentifiers) > 0 {
+		if len(params.SiteIDs) == 0 {
+			params.SiteIDs = nil
+		}
+		if len(params.DeviceIdentifiers) == 0 {
+			params.DeviceIdentifiers = nil
+		}
 		devices, err := s.GetQueries(ctx).ListRecentlyResolvedCurtailedDevicesByScope(ctx, sqlc.ListRecentlyResolvedCurtailedDevicesByScopeParams{
 			OrgID:             params.OrgID,
-			SiteID:            ptrToNullInt64(params.SiteID),
+			SiteIds:           params.SiteIDs,
 			DeviceIdentifiers: params.DeviceIdentifiers,
 			CooldownSec:       params.CooldownSec,
 		})
@@ -159,9 +165,27 @@ func (s *SQLCurtailmentStore) GetResponseProfile(ctx context.Context, orgID, pro
 	return responseProfileFromRow(row), nil
 }
 
+func (s *SQLCurtailmentStore) ListResponseProfileDeviceSites(ctx context.Context, orgID int64, deviceIdentifiers []string) (map[string]*int64, error) {
+	if len(deviceIdentifiers) == 0 {
+		return map[string]*int64{}, nil
+	}
+	rows, err := s.GetQueries(ctx).ListCurtailmentResponseProfileDeviceSitesByOrg(ctx, sqlc.ListCurtailmentResponseProfileDeviceSitesByOrgParams{
+		OrgID:             orgID,
+		DeviceIdentifiers: deviceIdentifiers,
+	})
+	if err != nil {
+		return nil, fleeterror.NewInternalErrorf("failed to list curtailment response profile device sites: %v", err)
+	}
+	out := make(map[string]*int64, len(rows))
+	for _, row := range rows {
+		out[row.DeviceIdentifier] = nullInt64ToPtr(row.SiteID)
+	}
+	return out, nil
+}
+
 func (s *SQLCurtailmentStore) CreateResponseProfile(ctx context.Context, profile models.ResponseProfile) (*models.ResponseProfile, error) {
 	row, err := db.WithTransaction(ctx, s.conn.DB, func(q *sqlc.Queries) (sqlc.CurtailmentResponseProfile, error) {
-		if err := lockResponseProfileSitesForWrite(ctx, q, profile.OrgID, profile.SiteID); err != nil {
+		if err := lockResponseProfileSitesForWrite(ctx, q, profile.OrgID, [][]byte{profile.ScopeJSON}, profile.SiteID); err != nil {
 			return sqlc.CurtailmentResponseProfile{}, err
 		}
 		return q.InsertCurtailmentResponseProfile(ctx, insertResponseProfileParams(profile))
@@ -172,12 +196,25 @@ func (s *SQLCurtailmentStore) CreateResponseProfile(ctx context.Context, profile
 	return responseProfileFromRow(row), nil
 }
 
-func (s *SQLCurtailmentStore) UpdateResponseProfile(ctx context.Context, profile models.ResponseProfile, expectedSiteID *int64) (*models.ResponseProfile, error) {
+func (s *SQLCurtailmentStore) UpdateResponseProfile(
+	ctx context.Context,
+	profile models.ResponseProfile,
+	expectedSiteID *int64,
+	expectedScopeJSON []byte,
+) (*models.ResponseProfile, error) {
+	normalizedExpectedScopeJSON := normalizedResponseProfileScopeJSON(expectedScopeJSON)
 	row, err := db.WithTransaction(ctx, s.conn.DB, func(q *sqlc.Queries) (sqlc.CurtailmentResponseProfile, error) {
-		if err := lockResponseProfileSitesForWrite(ctx, q, profile.OrgID, expectedSiteID, profile.SiteID); err != nil {
+		if err := lockResponseProfileSitesForWrite(
+			ctx,
+			q,
+			profile.OrgID,
+			[][]byte{profile.ScopeJSON, normalizedExpectedScopeJSON},
+			expectedSiteID,
+			profile.SiteID,
+		); err != nil {
 			return sqlc.CurtailmentResponseProfile{}, err
 		}
-		row, err := q.UpdateCurtailmentResponseProfile(ctx, updateResponseProfileParams(profile, expectedSiteID))
+		row, err := q.UpdateCurtailmentResponseProfile(ctx, updateResponseProfileParams(profile, expectedSiteID, normalizedExpectedScopeJSON))
 		if errors.Is(err, sql.ErrNoRows) {
 			if _, getErr := q.GetCurtailmentResponseProfileByOrg(ctx, sqlc.GetCurtailmentResponseProfileByOrgParams{
 				ID:    profile.ID,
@@ -197,7 +234,13 @@ func (s *SQLCurtailmentStore) UpdateResponseProfile(ctx context.Context, profile
 	return responseProfileFromRow(row), nil
 }
 
-func (s *SQLCurtailmentStore) DeleteResponseProfile(ctx context.Context, orgID, profileID int64, expectedSiteID *int64) error {
+func (s *SQLCurtailmentStore) DeleteResponseProfile(
+	ctx context.Context,
+	orgID,
+	profileID int64,
+	expectedSiteID *int64,
+	expectedScopeJSON []byte,
+) error {
 	count, err := s.CountAutomationRulesByResponseProfile(ctx, orgID, profileID)
 	if err != nil {
 		return err
@@ -206,9 +249,10 @@ func (s *SQLCurtailmentStore) DeleteResponseProfile(ctx context.Context, orgID, 
 		return fleeterror.NewFailedPreconditionError("curtailment response profile is referenced by an automation rule")
 	}
 	rows, err := s.GetQueries(ctx).DeleteCurtailmentResponseProfileByOrg(ctx, sqlc.DeleteCurtailmentResponseProfileByOrgParams{
-		ID:             profileID,
-		OrgID:          orgID,
-		ExpectedSiteID: ptrToNullInt64(expectedSiteID),
+		ID:                profileID,
+		OrgID:             orgID,
+		ExpectedSiteID:    ptrToNullInt64(expectedSiteID),
+		ExpectedScopeJson: normalizedResponseProfileScopeJSON(expectedScopeJSON),
 	})
 	if err != nil {
 		return fleeterror.NewInternalErrorf("failed to delete curtailment response profile: %v", err)
@@ -455,6 +499,7 @@ func automationRuleFromListRow(row sqlc.ListCurtailmentAutomationRulesByOrgRow) 
 		row.ResponseProfileID,
 		row.ResponseProfileName,
 		row.ResponseProfileSiteID,
+		row.ResponseProfileScopeJson,
 		row.Enabled,
 		row.LastSignal,
 		row.LastSignalAt,
@@ -479,6 +524,7 @@ func automationRuleFromGetRow(row sqlc.GetCurtailmentAutomationRuleByOrgRow) *mo
 		row.ResponseProfileID,
 		row.ResponseProfileName,
 		row.ResponseProfileSiteID,
+		row.ResponseProfileScopeJson,
 		row.Enabled,
 		row.LastSignal,
 		row.LastSignalAt,
@@ -503,6 +549,7 @@ func automationRuleFromEnabledMQTTRow(row sqlc.ListEnabledCurtailmentAutomationR
 		row.ResponseProfileID,
 		row.ResponseProfileName,
 		row.ResponseProfileSiteID,
+		row.ResponseProfileScopeJson,
 		row.Enabled,
 		row.LastSignal,
 		row.LastSignalAt,
@@ -526,6 +573,7 @@ func automationRuleFromFields(
 	responseProfileID int64,
 	responseProfileName string,
 	responseProfileSiteID sql.NullInt64,
+	responseProfileScopeJSON []byte,
 	enabled bool,
 	lastSignal sql.NullString,
 	lastSignalAt sql.NullTime,
@@ -538,25 +586,26 @@ func automationRuleFromFields(
 	updatedAt time.Time,
 ) *models.AutomationRule {
 	return &models.AutomationRule{
-		ID:                    id,
-		OrgID:                 orgID,
-		RuleName:              ruleName,
-		TriggerType:           models.AutomationTriggerType(triggerType),
-		MQTTSourceID:          mqttSourceID,
-		MQTTSourceName:        mqttSourceName,
-		ResponseProfileID:     responseProfileID,
-		ResponseProfileName:   responseProfileName,
-		ResponseProfileSiteID: nullInt64ToPtr(responseProfileSiteID),
-		Enabled:               enabled,
-		LastSignal:            nullAutomationSignalToPtr(lastSignal),
-		LastSignalAt:          nullTimeToPtr(lastSignalAt),
-		ActiveEventUUID:       nullUUIDToPtr(activeEventUUID),
-		LastStartedAt:         nullTimeToPtr(lastStartedAt),
-		LastRestoredAt:        nullTimeToPtr(lastRestoredAt),
-		LastError:             nullStringToPtr(lastError),
-		LastErrorAt:           nullTimeToPtr(lastErrorAt),
-		CreatedAt:             createdAt,
-		UpdatedAt:             updatedAt,
+		ID:                       id,
+		OrgID:                    orgID,
+		RuleName:                 ruleName,
+		TriggerType:              models.AutomationTriggerType(triggerType),
+		MQTTSourceID:             mqttSourceID,
+		MQTTSourceName:           mqttSourceName,
+		ResponseProfileID:        responseProfileID,
+		ResponseProfileName:      responseProfileName,
+		ResponseProfileSiteID:    nullInt64ToPtr(responseProfileSiteID),
+		ResponseProfileScopeJSON: responseProfileScopeJSON,
+		Enabled:                  enabled,
+		LastSignal:               nullAutomationSignalToPtr(lastSignal),
+		LastSignalAt:             nullTimeToPtr(lastSignalAt),
+		ActiveEventUUID:          nullUUIDToPtr(activeEventUUID),
+		LastStartedAt:            nullTimeToPtr(lastStartedAt),
+		LastRestoredAt:           nullTimeToPtr(lastRestoredAt),
+		LastError:                nullStringToPtr(lastError),
+		LastErrorAt:              nullTimeToPtr(lastErrorAt),
+		CreatedAt:                createdAt,
+		UpdatedAt:                updatedAt,
 	}
 }
 
@@ -597,8 +646,17 @@ func mapAutomationRuleWriteError(action string, err error) error {
 	return fleeterror.NewInternalErrorf("failed to %s curtailment automation rule: %v", action, err)
 }
 
-func lockResponseProfileSitesForWrite(ctx context.Context, q *sqlc.Queries, orgID int64, siteIDs ...*int64) error {
-	for _, siteID := range responseProfileSiteIDsForLock(siteIDs...) {
+func lockResponseProfileSitesForWrite(ctx context.Context, q *sqlc.Queries, orgID int64, scopeJSONs [][]byte, siteIDs ...*int64) error {
+	var ids []int64
+	for _, scopeJSON := range scopeJSONs {
+		scopeSiteIDs, err := responseProfileScopeSiteIDsForLock(scopeJSON)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, scopeSiteIDs...)
+	}
+	ids = append(ids, responseProfileSiteIDsForLock(siteIDs...)...)
+	for _, siteID := range uniqueSortedInt64s(ids) {
 		if _, err := q.LockSiteForWrite(ctx, sqlc.LockSiteForWriteParams{ID: siteID, OrgID: orgID}); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return fleeterror.NewNotFoundErrorf("site not found: %d", siteID)
@@ -607,6 +665,24 @@ func lockResponseProfileSitesForWrite(ctx context.Context, q *sqlc.Queries, orgI
 		}
 	}
 	return nil
+}
+
+func responseProfileScopeSiteIDsForLock(scopeJSON []byte) ([]int64, error) {
+	if len(scopeJSON) == 0 {
+		return nil, nil
+	}
+	var payload struct {
+		SiteID  int64   `json:"site_id"`
+		SiteIDs []int64 `json:"site_ids"`
+	}
+	if err := json.Unmarshal(scopeJSON, &payload); err != nil {
+		return nil, fleeterror.NewInvalidArgumentErrorf("invalid curtailment response profile scope_json: %v", err)
+	}
+	siteIDs := append([]int64(nil), payload.SiteIDs...)
+	if payload.SiteID > 0 {
+		siteIDs = append(siteIDs, payload.SiteID)
+	}
+	return siteIDs, nil
 }
 
 func responseProfileSiteIDsForLock(siteIDs ...*int64) []int64 {
@@ -621,6 +697,26 @@ func responseProfileSiteIDsForLock(siteIDs ...*int64) []int64 {
 		}
 		seen[*siteID] = struct{}{}
 		out = append(out, *siteID)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+func uniqueSortedInt64s(values []int64) []int64 {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[int64]struct{}, len(values))
+	out := make([]int64, 0, len(values))
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
@@ -641,7 +737,11 @@ func (s *SQLCurtailmentStore) InsertEventWithTargets(
 	}
 	replayRace := false
 	result, err := db.WithTransaction(ctx, s.conn.DB, func(q *sqlc.Queries) (*models.InsertEventResult, error) {
-		if usesHierarchicalCurtailmentScope(event) {
+		scopeSiteIDs, usesScopeGuard, err := hierarchicalScopeSiteIDs(event)
+		if err != nil {
+			return nil, err
+		}
+		if usesScopeGuard {
 			if err := q.LockCurtailmentScopeForWrite(ctx, strconv.FormatInt(event.OrgID, 10)); err != nil {
 				return nil, fleeterror.NewInternalErrorf("failed to lock curtailment scope: %v", err)
 			}
@@ -651,16 +751,12 @@ func (s *SQLCurtailmentStore) InsertEventWithTargets(
 				replayRace = true
 				return nil, nil
 			}
-			scopeSiteID, err := hierarchicalScopeSiteID(event)
-			if err != nil {
-				return nil, err
-			}
 			conflicts, err := q.CountCurtailmentScopeConflicts(ctx, sqlc.CountCurtailmentScopeConflictsParams{
 				OrgID:     event.OrgID,
 				Mode:      string(event.Mode),
 				LoopType:  string(event.LoopType),
 				ScopeType: string(event.ScopeType),
-				SiteID:    scopeSiteID,
+				SiteIds:   scopeSiteIDs,
 			})
 			if err != nil {
 				return nil, fleeterror.NewInternalErrorf("failed to check curtailment scope conflicts: %v", err)
@@ -794,31 +890,52 @@ func cooldownSecFromDecisionSnapshot(snapshotJSON []byte) int32 {
 	return snapshot.PostEventCooldownSec
 }
 
-func usesHierarchicalCurtailmentScope(event models.InsertEventParams) bool {
+func hierarchicalScopeSiteIDs(event models.InsertEventParams) ([]int64, bool, error) {
 	if event.State.IsTerminal() {
-		return false
+		return nil, false, nil
 	}
 	switch event.ScopeType {
-	case models.ScopeTypeWholeOrg, models.ScopeTypeSite:
-		return true
+	case models.ScopeTypeWholeOrg:
+		return nil, true, nil
+	case models.ScopeTypeSite:
+		var scope struct {
+			SiteID int64 `json:"site_id"`
+		}
+		if err := json.Unmarshal(event.ScopeJSON, &scope); err != nil || scope.SiteID <= 0 {
+			return nil, false, fleeterror.NewInternalErrorf("invalid site scope for closed-loop curtailment event")
+		}
+		return []int64{scope.SiteID}, true, nil
+	case models.ScopeTypeMixed:
+		var scope struct {
+			SiteIDs           []int64  `json:"site_ids"`
+			DeviceSetIDs      []string `json:"device_set_ids"`
+			DeviceIdentifiers []string `json:"device_identifiers"`
+		}
+		if err := json.Unmarshal(event.ScopeJSON, &scope); err != nil {
+			return nil, false, fleeterror.NewInternalErrorf("invalid mixed scope for closed-loop curtailment event")
+		}
+		if containsNonPositiveInt64(scope.SiteIDs) {
+			return nil, false, fleeterror.NewInternalErrorf("invalid mixed site scope for closed-loop curtailment event")
+		}
+		siteIDs := uniqueSortedInt64s(scope.SiteIDs)
+		if len(siteIDs) > 0 && len(scope.DeviceSetIDs) == 0 && len(scope.DeviceIdentifiers) == 0 {
+			return siteIDs, true, nil
+		}
+		return nil, false, nil
 	case models.ScopeTypeDeviceSets, models.ScopeTypeDeviceList:
-		return false
+		return nil, false, nil
 	default:
-		return false
+		return nil, false, nil
 	}
 }
 
-func hierarchicalScopeSiteID(event models.InsertEventParams) (string, error) {
-	if event.ScopeType != models.ScopeTypeSite {
-		return "", nil
+func containsNonPositiveInt64(values []int64) bool {
+	for _, value := range values {
+		if value <= 0 {
+			return true
+		}
 	}
-	var scope struct {
-		SiteID int64 `json:"site_id"`
-	}
-	if err := json.Unmarshal(event.ScopeJSON, &scope); err != nil || scope.SiteID <= 0 {
-		return "", fleeterror.NewInternalErrorf("invalid site scope for closed-loop curtailment event")
-	}
-	return strconv.FormatInt(scope.SiteID, 10), nil
+	return false
 }
 
 func lookupReplayEventInTx(ctx context.Context, q *sqlc.Queries, event models.InsertEventParams) (*models.Event, error) {
@@ -1260,7 +1377,7 @@ func (s *SQLCurtailmentStore) ListTargetSiteIDsByEvent(ctx context.Context, orgI
 		return nil, false, fleeterror.NewInternalErrorf("failed to list curtailment target site coverage: %v", err)
 	}
 	if len(rows) == 0 {
-		return nil, false, nil
+		return nil, true, nil
 	}
 	siteIDs := make([]int64, 0, len(rows))
 	complete := rows[0].TargetCount > 0 && rows[0].TargetCount == rows[0].MappedTargetCount
@@ -1304,7 +1421,7 @@ func (s *SQLCurtailmentStore) ListCandidates(ctx context.Context, params interfa
 	params = normalizeListCandidatesParams(params)
 	rows, err := s.GetQueries(ctx).ListCurtailmentCandidatesByOrg(ctx, sqlc.ListCurtailmentCandidatesByOrgParams{
 		OrgID:             params.OrgID,
-		SiteID:            ptrToNullInt64(params.SiteID),
+		SiteIds:           params.SiteIDs,
 		DeviceIdentifiers: params.DeviceIdentifiers,
 	})
 	if err != nil {
@@ -1330,6 +1447,9 @@ func (s *SQLCurtailmentStore) ListCandidates(ctx context.Context, params interfa
 func normalizeListCandidatesParams(params interfaces.ListCandidatesParams) interfaces.ListCandidatesParams {
 	if len(params.DeviceIdentifiers) == 0 {
 		params.DeviceIdentifiers = nil
+	}
+	if len(params.SiteIDs) == 0 {
+		params.SiteIDs = nil
 	}
 	return params
 }
@@ -2077,6 +2197,7 @@ func responseProfileFromRow(row sqlc.CurtailmentResponseProfile) *models.Respons
 		OrgID:                   row.OrgID,
 		ProfileName:             row.ProfileName,
 		SiteID:                  nullInt64ToPtr(row.SiteID),
+		ScopeJSON:               row.ScopeJson,
 		Mode:                    models.Mode(row.Mode),
 		Strategy:                models.Strategy(row.Strategy),
 		Level:                   models.Level(row.Level),
@@ -2100,6 +2221,7 @@ func insertResponseProfileParams(profile models.ResponseProfile) sqlc.InsertCurt
 		OrgID:                   profile.OrgID,
 		ProfileName:             profile.ProfileName,
 		SiteID:                  ptrToNullInt64(profile.SiteID),
+		ScopeJson:               responseProfileScopeJSON(profile),
 		Mode:                    string(profile.Mode),
 		Strategy:                string(profile.Strategy),
 		Level:                   string(profile.Level),
@@ -2116,13 +2238,19 @@ func insertResponseProfileParams(profile models.ResponseProfile) sqlc.InsertCurt
 	}
 }
 
-func updateResponseProfileParams(profile models.ResponseProfile, expectedSiteID *int64) sqlc.UpdateCurtailmentResponseProfileParams {
+func updateResponseProfileParams(
+	profile models.ResponseProfile,
+	expectedSiteID *int64,
+	expectedScopeJSON []byte,
+) sqlc.UpdateCurtailmentResponseProfileParams {
 	return sqlc.UpdateCurtailmentResponseProfileParams{
 		ID:                      profile.ID,
 		OrgID:                   profile.OrgID,
 		ExpectedSiteID:          ptrToNullInt64(expectedSiteID),
+		ExpectedScopeJson:       normalizedResponseProfileScopeJSON(expectedScopeJSON),
 		ProfileName:             profile.ProfileName,
 		SiteID:                  ptrToNullInt64(profile.SiteID),
+		ScopeJson:               responseProfileScopeJSON(profile),
 		Mode:                    string(profile.Mode),
 		Strategy:                string(profile.Strategy),
 		Level:                   string(profile.Level),
@@ -2137,6 +2265,17 @@ func updateResponseProfileParams(profile models.ResponseProfile, expectedSiteID 
 		ForceIncludeMaintenance: profile.ForceIncludeMaintenance,
 		PostEventCooldownSec:    profile.PostEventCooldownSec,
 	}
+}
+
+func responseProfileScopeJSON(profile models.ResponseProfile) []byte {
+	return normalizedResponseProfileScopeJSON(profile.ScopeJSON)
+}
+
+func normalizedResponseProfileScopeJSON(scopeJSON []byte) []byte {
+	if len(scopeJSON) == 0 {
+		return []byte("{}")
+	}
+	return scopeJSON
 }
 
 func mapResponseProfileWriteError(action string, err error) error {

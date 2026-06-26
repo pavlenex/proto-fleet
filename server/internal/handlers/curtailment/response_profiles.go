@@ -28,24 +28,31 @@ func (h *Handler) ListCurtailmentResponseProfiles(ctx context.Context, _ *connec
 		return nil, err
 	}
 	out := make([]*pb.CurtailmentResponseProfile, 0, len(profiles))
+	deviceSites, err := h.responseProfileDeviceSitesForProfiles(ctx, info.OrganizationID, profiles)
+	if err != nil {
+		return nil, err
+	}
 	siteAllowed := make(map[int64]bool)
+	orgWideAllowed := false
+	orgWideChecked := false
 	for _, profile := range profiles {
-		if profile.SiteID != nil {
-			allowed, ok := siteAllowed[*profile.SiteID]
-			if !ok {
-				if err := requireResponseProfileSitePermission(ctx, authz.PermCurtailmentManage, profile); err != nil {
-					if fleeterror.IsForbiddenError(err) {
-						siteAllowed[*profile.SiteID] = false
-						continue
-					}
-					return nil, err
-				}
-				allowed = true
-				siteAllowed[*profile.SiteID] = true
-			}
-			if !allowed {
-				continue
-			}
+		requirements, err := h.responseProfileResourceContextRequirements(ctx, info.OrganizationID, profile, deviceSites, false)
+		if err != nil {
+			return nil, err
+		}
+		allowed, err := resourceContextRequirementsAllowed(
+			ctx,
+			authz.PermCurtailmentManage,
+			requirements,
+			siteAllowed,
+			&orgWideAllowed,
+			&orgWideChecked,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !allowed {
+			continue
 		}
 		out = append(out, toResponseProfileProto(profile))
 	}
@@ -68,12 +75,19 @@ func (h *Handler) GetCurtailmentResponseProfile(ctx context.Context, req *connec
 }
 
 func (h *Handler) CreateCurtailmentResponseProfile(ctx context.Context, req *connect.Request[pb.CreateCurtailmentResponseProfileRequest]) (*connect.Response[pb.CreateCurtailmentResponseProfileResponse], error) {
-	info, err := requireOrgPermissionWithOptionalSiteContext(ctx, authz.PermCurtailmentManage, responseProfileSiteResourceContext(req.Msg.GetSite()))
+	info, err := middleware.RequirePermission(ctx, authz.PermCurtailmentManage, authz.ResourceContext{})
 	if err != nil {
 		return nil, err
 	}
 	if h.responseProfiles == nil {
 		return nil, errCurtailmentNotImplemented("CreateCurtailmentResponseProfile")
+	}
+	requirements, err := h.responseProfileResourceContexts(ctx, info.OrganizationID, req.Msg.GetScopes(), req.Msg.GetSite(), true)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireResourceContextPermissions(ctx, authz.PermCurtailmentManage, requirements); err != nil {
+		return nil, err
 	}
 	profile, err := responseProfileFromCreateRequest(info.OrganizationID, req.Msg)
 	if err != nil {
@@ -105,13 +119,24 @@ func (h *Handler) UpdateCurtailmentResponseProfile(ctx context.Context, req *con
 	if err != nil {
 		return nil, err
 	}
-	if err := requireResponseProfileSitePermission(ctx, authz.PermCurtailmentManage, &profile); err != nil {
+	if responseProfileUpdateOmitsScope(req.Msg) {
+		preserveScope, err := responseProfileUpdateShouldPreserveOmittedScope(existing)
+		if err != nil {
+			return nil, err
+		}
+		if preserveScope {
+			profile.SiteID = cloneInt64Ptr(existing.SiteID)
+			profile.ScopeJSON = cloneBytes(existing.ScopeJSON)
+		}
+	}
+	if err := h.requireResponseProfileSitePermission(ctx, info.OrganizationID, authz.PermCurtailmentManage, &profile, true); err != nil {
 		return nil, err
 	}
 	updated, err := h.responseProfiles.Update(ctx, domainCurtailment.SaveResponseProfileRequest{
 		Profile:             profile,
 		CanUseAdminControls: canUseAdminControls(info),
 		ExpectedSiteID:      cloneInt64Ptr(existing.SiteID),
+		ExpectedScopeJSON:   cloneBytes(existing.ScopeJSON),
 	})
 	if err != nil {
 		return nil, err
@@ -131,7 +156,7 @@ func (h *Handler) DeleteCurtailmentResponseProfile(ctx context.Context, req *con
 	if err != nil {
 		return nil, err
 	}
-	if err := h.responseProfiles.Delete(ctx, info.OrganizationID, req.Msg.GetProfileId(), cloneInt64Ptr(profile.SiteID)); err != nil {
+	if err := h.responseProfiles.Delete(ctx, info.OrganizationID, req.Msg.GetProfileId(), cloneInt64Ptr(profile.SiteID), cloneBytes(profile.ScopeJSON)); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&pb.DeleteCurtailmentResponseProfileResponse{}), nil
@@ -142,26 +167,161 @@ func (h *Handler) getResponseProfileWithSitePermission(ctx context.Context, orgI
 	if err != nil {
 		return nil, err
 	}
-	if err := requireResponseProfileSitePermission(ctx, authz.PermCurtailmentManage, profile); err != nil {
+	if err := h.requireResponseProfileSitePermission(ctx, orgID, authz.PermCurtailmentManage, profile, false); err != nil {
 		return nil, err
 	}
 	return profile, nil
 }
 
-func responseProfileSiteResourceContext(site *pb.ScopeSite) authz.ResourceContext {
+func (h *Handler) responseProfileResourceContexts(
+	ctx context.Context,
+	orgID int64,
+	scopes []*pb.CurtailmentScope,
+	site *pb.ScopeSite,
+	requireKnownDevices bool,
+) (scopeResourceContextRequirements, error) {
+	if len(scopes) > 0 {
+		return h.scopeResourceContextRequirementsFromProto(ctx, orgID, scopes, nil, requireKnownDevices)
+	}
 	if site == nil {
-		return authz.ResourceContext{}
+		return scopeResourceContextRequirements{}, nil
 	}
 	siteID := site.GetSiteId()
-	return authz.ResourceContext{SiteID: &siteID}
+	return scopeResourceContextRequirements{siteContexts: []authz.ResourceContext{{SiteID: &siteID}}}, nil
 }
 
-func requireResponseProfileSitePermission(ctx context.Context, permission string, profile *models.ResponseProfile) error {
-	if profile == nil || profile.SiteID == nil {
+func (h *Handler) requireResponseProfileSitePermission(
+	ctx context.Context,
+	orgID int64,
+	permission string,
+	profile *models.ResponseProfile,
+	requireKnownDevices bool,
+) error {
+	requirements, err := h.responseProfileResourceContextRequirements(ctx, orgID, profile, nil, requireKnownDevices)
+	if err != nil {
+		return err
+	}
+	return requireResourceContextPermissions(ctx, permission, requirements)
+}
+
+func (h *Handler) responseProfileDeviceSitesForProfiles(
+	ctx context.Context,
+	orgID int64,
+	profiles []*models.ResponseProfile,
+) (map[string]*int64, error) {
+	var deviceIdentifiers []string
+	for _, profile := range profiles {
+		if profile == nil {
+			continue
+		}
+		scope, err := domainCurtailment.ResponseProfileScope(*profile)
+		if err != nil {
+			return nil, err
+		}
+		deviceIdentifiers = append(deviceIdentifiers, scope.DeviceIdentifiers...)
+	}
+	deviceIdentifiers = uniqueResponseProfileDeviceIdentifiers(deviceIdentifiers)
+	if len(deviceIdentifiers) == 0 {
+		return map[string]*int64{}, nil
+	}
+	if h.responseProfiles == nil {
+		return nil, nil
+	}
+	return h.responseProfiles.ListDeviceSites(ctx, orgID, deviceIdentifiers)
+}
+
+func (h *Handler) responseProfileResourceContextRequirements(
+	ctx context.Context,
+	orgID int64,
+	profile *models.ResponseProfile,
+	deviceSites map[string]*int64,
+	requireKnownDevices bool,
+) (scopeResourceContextRequirements, error) {
+	if profile == nil {
+		return scopeResourceContextRequirements{}, nil
+	}
+	scope, err := domainCurtailment.ResponseProfileScope(*profile)
+	if err != nil {
+		return scopeResourceContextRequirements{}, err
+	}
+	return h.scopeResourceContextRequirements(ctx, orgID, scope, deviceSites, requireKnownDevices)
+}
+
+func resourceContextRequirementsAllowed(
+	ctx context.Context,
+	permission string,
+	requirements scopeResourceContextRequirements,
+	siteAllowed map[int64]bool,
+	orgWideAllowed *bool,
+	orgWideChecked *bool,
+) (bool, error) {
+	if requirements.requireOrgWide {
+		if !*orgWideChecked {
+			*orgWideChecked = true
+			if _, err := middleware.RequireOrgWidePermission(ctx, permission); err != nil {
+				if fleeterror.IsForbiddenError(err) {
+					*orgWideAllowed = false
+				} else {
+					return false, err
+				}
+			} else {
+				*orgWideAllowed = true
+			}
+		}
+		if !*orgWideAllowed {
+			return false, nil
+		}
+	}
+	for _, siteContext := range requirements.siteContexts {
+		if siteContext.SiteID == nil {
+			continue
+		}
+		siteAllowedValue, ok := siteAllowed[*siteContext.SiteID]
+		if !ok {
+			if _, err := middleware.RequirePermission(ctx, permission, siteContext); err != nil {
+				if fleeterror.IsForbiddenError(err) {
+					siteAllowed[*siteContext.SiteID] = false
+					return false, nil
+				}
+				return false, err
+			}
+			siteAllowedValue = true
+			siteAllowed[*siteContext.SiteID] = true
+		}
+		if !siteAllowedValue {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func siteIDsFromResourceContexts(contexts []authz.ResourceContext) []int64 {
+	siteIDs := make([]int64, 0, len(contexts))
+	for _, context := range contexts {
+		if context.SiteID != nil {
+			siteIDs = append(siteIDs, *context.SiteID)
+		}
+	}
+	return siteIDs
+}
+
+func uniqueResponseProfileDeviceIdentifiers(values []string) []string {
+	if len(values) == 0 {
 		return nil
 	}
-	_, err := middleware.RequirePermission(ctx, permission, authz.ResourceContext{SiteID: profile.SiteID})
-	return err
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func cloneInt64Ptr(v *int64) *int64 {
@@ -172,12 +332,42 @@ func cloneInt64Ptr(v *int64) *int64 {
 	return &out
 }
 
+func cloneBytes(v []byte) []byte {
+	if len(v) == 0 {
+		return nil
+	}
+	return append([]byte(nil), v...)
+}
+
+func responseProfileUpdateOmitsScope(msg *pb.UpdateCurtailmentResponseProfileRequest) bool {
+	return msg.GetSite() == nil && len(msg.GetScopes()) == 0
+}
+
+func responseProfileUpdateShouldPreserveOmittedScope(profile *models.ResponseProfile) (bool, error) {
+	if profile == nil {
+		return false, nil
+	}
+	scope, err := domainCurtailment.ResponseProfileScope(*profile)
+	if err != nil {
+		return false, err
+	}
+	switch scope.Type {
+	case models.ScopeTypeMixed, models.ScopeTypeDeviceList, models.ScopeTypeDeviceSets:
+		return true, nil
+	case models.ScopeTypeWholeOrg, models.ScopeTypeSite, "":
+		return false, nil
+	default:
+		return false, nil
+	}
+}
+
 func responseProfileFromCreateRequest(orgID int64, msg *pb.CreateCurtailmentResponseProfileRequest) (models.ResponseProfile, error) {
 	profile, err := responseProfileFromPayload(
 		orgID,
 		0,
 		msg.GetProfileName(),
 		msg.GetSite(),
+		msg.GetScopes(),
 		msg.GetMode(),
 		msg.GetStrategy(),
 		msg.GetLevel(),
@@ -204,6 +394,7 @@ func responseProfileFromUpdateRequest(orgID int64, msg *pb.UpdateCurtailmentResp
 		msg.GetProfileId(),
 		msg.GetProfileName(),
 		msg.GetSite(),
+		msg.GetScopes(),
 		msg.GetMode(),
 		msg.GetStrategy(),
 		msg.GetLevel(),
@@ -225,6 +416,7 @@ func responseProfileFromPayload(
 	profileID int64,
 	name string,
 	site *pb.ScopeSite,
+	scopes []*pb.CurtailmentScope,
 	modeProto pb.CurtailmentMode,
 	strategyProto pb.CurtailmentStrategy,
 	levelProto pb.CurtailmentLevel,
@@ -307,6 +499,21 @@ func responseProfileFromPayload(
 		siteID := site.GetSiteId()
 		profile.SiteID = &siteID
 	}
+	if len(scopes) > 0 {
+		scope, err := toCompositeScope(scopes)
+		if err != nil {
+			return models.ResponseProfile{}, err
+		}
+		scopeJSON, err := domainCurtailment.MarshalScopeJSON(scope)
+		if err != nil {
+			return models.ResponseProfile{}, err
+		}
+		if scope.Type == models.ScopeTypeWholeOrg {
+			scopeJSON = []byte(`{"whole_org":true}`)
+		}
+		profile.ScopeJSON = scopeJSON
+		profile.SiteID = legacySiteIDForScope(scope)
+	}
 	return profile, nil
 }
 
@@ -334,6 +541,19 @@ func toResponseProfileProto(profile *models.ResponseProfile) *pb.CurtailmentResp
 	if profile.SiteID != nil {
 		out.Site = &pb.ScopeSite{SiteId: *profile.SiteID}
 	}
+	if scope, hasScope, err := domainCurtailment.ScopeFromJSON(profile.ScopeJSON); err == nil && hasScope {
+		if scopes := protoScopesFromDomainScope(scope); len(scopes) > 0 {
+			out.Scopes = scopes
+		}
+	} else if profile.SiteID != nil {
+		scope, err := domainCurtailment.ResponseProfileScope(*profile)
+		if err != nil {
+			return out
+		}
+		if scopes := protoScopesFromDomainScope(scope); len(scopes) > 0 {
+			out.Scopes = scopes
+		}
+	}
 	if profile.Mode == models.ModeFixedKw && profile.TargetKW != nil {
 		fixedKw := &pb.FixedKwParams{TargetKw: *profile.TargetKW}
 		if profile.ToleranceKW != nil {
@@ -342,6 +562,14 @@ func toResponseProfileProto(profile *models.ResponseProfile) *pb.CurtailmentResp
 		out.ModeParams = &pb.CurtailmentResponseProfile_FixedKw{FixedKw: fixedKw}
 	}
 	return out
+}
+
+func legacySiteIDForScope(scope domainCurtailment.Scope) *int64 {
+	if scope.Type != models.ScopeTypeSite || len(scope.SiteIDs) != 1 {
+		return nil
+	}
+	siteID := scope.SiteIDs[0]
+	return &siteID
 }
 
 func optionalUint32ToInt32(field string, v *uint32) (*int32, error) {

@@ -15,20 +15,24 @@ import {
   getUnsupportedDeviceSetPreviewError,
   useCurtailmentPlanPreview,
 } from "@/protoFleet/features/energy/useCurtailmentPlanPreview";
-import MinerSelectionModal from "@/protoFleet/features/settings/components/Schedules/MinerSelectionModal";
+import MinerSelectionModal, {
+  type MinerSelectionValue,
+} from "@/protoFleet/features/settings/components/Schedules/MinerSelectionModal";
 import { Alert, LightningAlt, Question } from "@/shared/assets/icons";
 import { variants } from "@/shared/components/Button";
 import Checkbox from "@/shared/components/Checkbox";
 import Dialog, { DialogIcon } from "@/shared/components/Dialog";
 import Input from "@/shared/components/Input";
+import Modal, { ModalSelectAllFooter } from "@/shared/components/Modal";
 import Popover, { PopoverProvider, popoverSizes, usePopover } from "@/shared/components/Popover";
 import ProgressCircular from "@/shared/components/ProgressCircular";
 import Select from "@/shared/components/Select";
-import SelectRowList from "@/shared/components/SelectRowList";
-import { positions, selectTypes } from "@/shared/constants";
+import { positions } from "@/shared/constants";
 
 export type CurtailmentPriority = "normal" | "emergency";
 export type CurtailmentScopeType = "wholeOrg" | "site" | "deviceSet" | "explicitMiners";
+export type CurtailmentSiteSelection = "none" | "allSites" | "site";
+export type CurtailmentMinerSelectionMode = "subset" | "all";
 export type ResponseProfileId = string;
 export type CurtailmentMode = "fixedKwReduction" | "fullFleet";
 export type MinerSelectionStrategy = "leastEfficientFirst";
@@ -39,9 +43,13 @@ export type ResponseProfileModalMode = "create" | "edit";
 export interface CurtailmentFormValues {
   scopeType: CurtailmentScopeType;
   scopeId?: string;
+  siteSelection?: CurtailmentSiteSelection;
   siteId?: string;
+  siteIds?: string[];
+  siteNamesById?: Record<string, string>;
   deviceSetIds: string[];
   deviceIdentifiers: string[];
+  minerSelectionMode?: CurtailmentMinerSelectionMode;
   responseProfileId: ResponseProfileId;
   curtailmentMode: CurtailmentMode;
   minerSelectionStrategy: MinerSelectionStrategy;
@@ -104,6 +112,7 @@ interface CurtailmentStartModalProps {
   initialValues?: Partial<CurtailmentFormValues>;
   responseProfiles?: CurtailmentResponseProfileOption[];
   siteOptions?: CurtailmentSiteOption[];
+  defaultSiteScope?: CurtailmentSiteOption;
   siteScopeEnabled?: boolean;
   isSiteScopeLoading?: boolean;
   siteScopeDisabledReason?: string;
@@ -148,14 +157,21 @@ interface ApplyToTarget {
 
 type ParsedNumberField = { parsed?: number; error?: string };
 type EditableCurtailmentField = "reason" | "restoreIntervalSec";
-type ResponseProfileScopeRow = {
+type SiteScopeRow = {
   id: string;
-  text: string;
-  subtext: string;
+  label: string;
   isSelected: boolean;
   disabled?: boolean;
   "data-testid": string;
 };
+
+interface SiteScopeOptionProps {
+  disabled?: boolean;
+  isSelected: boolean;
+  label: string;
+  onChange: () => void;
+  testId: string;
+}
 
 export const customResponseProfileId = "customPlan";
 const responseProfileDescription = "Saved configurations that define how much power to shed and how to restore it.";
@@ -170,9 +186,13 @@ const fieldHelp = {
 const defaultValues: CurtailmentFormValues = {
   scopeType: "wholeOrg",
   scopeId: "whole-org",
+  siteSelection: "none",
   siteId: "",
+  siteIds: [],
+  siteNamesById: {},
   deviceSetIds: [],
   deviceIdentifiers: [],
+  minerSelectionMode: "subset",
   responseProfileId: customResponseProfileId,
   curtailmentMode: "fixedKwReduction",
   minerSelectionStrategy: "leastEfficientFirst",
@@ -193,8 +213,12 @@ const curtailmentModeOptions = [
   { value: "fixedKwReduction", label: "Fixed kW reduction" },
   { value: "fullFleet", label: "Full shutdown" },
 ];
-const wholeFleetScopeRowId = "whole-org";
 const getSiteScopeRowId = (siteId: string) => `site:${siteId}`;
+
+function uniqueNonEmptyStrings(values: readonly string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
 const getValidSiteScopeId = (siteId?: string): string | undefined => {
   const normalizedSiteId = siteId?.trim();
   if (!normalizedSiteId) {
@@ -205,45 +229,238 @@ const getValidSiteScopeId = (siteId?: string): string | undefined => {
   return parsedSiteId?.toString() === normalizedSiteId ? normalizedSiteId : undefined;
 };
 
+function getValidSiteScopeIds(siteIds?: readonly string[], fallbackSiteId?: string): string[] {
+  const normalizedSiteIds = siteIds?.flatMap((siteId) => {
+    const validSiteId = getValidSiteScopeId(siteId);
+    return validSiteId ? [validSiteId] : [];
+  });
+
+  if (normalizedSiteIds !== undefined && normalizedSiteIds.length > 0) {
+    return uniqueNonEmptyStrings(normalizedSiteIds);
+  }
+
+  const validFallbackSiteId = getValidSiteScopeId(fallbackSiteId);
+  return validFallbackSiteId ? [validFallbackSiteId] : [];
+}
+
+function getSelectedSiteIds(values: Pick<CurtailmentFormValues, "siteSelection" | "siteId" | "siteIds">): string[] {
+  return values.siteSelection === "site" ? getValidSiteScopeIds(values.siteIds, values.siteId) : [];
+}
+
+function getSiteScopeIds(values: Pick<CurtailmentFormValues, "siteSelection" | "siteId" | "siteIds">): string[] {
+  return values.siteSelection === "site" || values.siteSelection === "allSites"
+    ? getValidSiteScopeIds(values.siteIds, values.siteId)
+    : [];
+}
+
+function getSiteNameForId(values: Partial<CurtailmentFormValues>, siteId: string): string {
+  return (
+    values.siteNamesById?.[siteId]?.trim() ||
+    (values.siteId === siteId ? values.scopeId?.trim() : undefined) ||
+    `Site ${siteId}`
+  );
+}
+
+function createSiteNamesById(sites: readonly CurtailmentSiteOption[]): Record<string, string> {
+  return Object.fromEntries(sites.map((site) => [site.id, site.name]));
+}
+
+function getSiteScopeLabel(sites: readonly CurtailmentSiteOption[]): string {
+  if (sites.length === 1) {
+    return sites[0].name || `Site ${sites[0].id}`;
+  }
+
+  return `${sites.length} sites`;
+}
+
+function hasAllMinersSelected(values: Pick<CurtailmentFormValues, "minerSelectionMode">): boolean {
+  return values.minerSelectionMode === "all";
+}
+
+function getExplicitMinerCount(
+  values: Pick<CurtailmentFormValues, "deviceIdentifiers" | "minerSelectionMode">,
+): number {
+  return hasAllMinersSelected(values) ? 0 : values.deviceIdentifiers.length;
+}
+
+function hasSelectedCurtailmentTarget(
+  values: Pick<
+    CurtailmentFormValues,
+    "deviceIdentifiers" | "deviceSetIds" | "minerSelectionMode" | "siteId" | "siteIds" | "siteSelection"
+  >,
+): boolean {
+  return (
+    hasAllMinersSelected(values) ||
+    getSiteScopeIds(values).length > 0 ||
+    getExplicitMinerCount(values) > 0 ||
+    values.deviceSetIds.length > 0
+  );
+}
+
 function withWholeFleetScope(values: CurtailmentFormValues): CurtailmentFormValues {
   return {
     ...values,
     scopeType: "wholeOrg",
     scopeId: "whole-org",
+    siteSelection: "none",
     siteId: "",
+    siteIds: [],
+    siteNamesById: {},
     deviceSetIds: [],
     deviceIdentifiers: [],
+    minerSelectionMode: "subset",
   };
 }
 
-function withSiteScope(values: CurtailmentFormValues, siteId: string, siteName?: string): CurtailmentFormValues {
+function withAllMinerScope(values: CurtailmentFormValues): CurtailmentFormValues {
   return {
     ...values,
-    scopeType: "site",
-    scopeId: siteName || `Site ${siteId}`,
-    siteId,
+    scopeType: "wholeOrg",
+    scopeId: "whole-org",
+    siteSelection: "allSites",
+    siteId: "",
+    siteIds: [],
+    siteNamesById: {},
     deviceSetIds: [],
     deviceIdentifiers: [],
+    minerSelectionMode: "all",
+  };
+}
+
+function withAllSitesScope(
+  values: CurtailmentFormValues,
+  sites: readonly CurtailmentSiteOption[] = getSiteScopeIds(values).map((siteId) => ({
+    id: siteId,
+    name: getSiteNameForId(values, siteId),
+  })),
+): CurtailmentFormValues {
+  const selectedSites = uniqueNonEmptyStrings(sites.map((site) => site.id)).map((siteId) => {
+    const site = sites.find((candidate) => candidate.id === siteId);
+    return {
+      id: siteId,
+      name: site?.name?.trim() || `Site ${siteId}`,
+    };
+  });
+  const firstSite = selectedSites[0];
+  const hadAllMinersSelected = hasAllMinersSelected(values);
+  const hasSelectedMiners = !hadAllMinersSelected && getExplicitMinerCount(values) > 0;
+
+  return {
+    ...values,
+    scopeType: hasSelectedMiners ? "explicitMiners" : selectedSites.length > 0 ? "site" : "wholeOrg",
+    scopeId: selectedSites.length > 0 ? "All sites" : "whole-org",
+    siteSelection: "allSites",
+    siteId: firstSite?.id ?? "",
+    siteIds: selectedSites.map((site) => site.id),
+    siteNamesById: createSiteNamesById(selectedSites),
+    deviceSetIds: [],
+    deviceIdentifiers: hadAllMinersSelected ? [] : values.deviceIdentifiers,
+    minerSelectionMode: "subset",
+  };
+}
+
+function withNoSiteScope(values: CurtailmentFormValues): CurtailmentFormValues {
+  const hasSelectedMiners = getExplicitMinerCount(values) > 0;
+
+  return {
+    ...values,
+    scopeType: hasSelectedMiners ? "explicitMiners" : "wholeOrg",
+    scopeId: hasSelectedMiners ? undefined : "whole-org",
+    siteSelection: "none",
+    siteId: "",
+    siteIds: [],
+    siteNamesById: {},
+    deviceSetIds: [],
+  };
+}
+
+function withSiteScopes(values: CurtailmentFormValues, sites: readonly CurtailmentSiteOption[]): CurtailmentFormValues {
+  const selectedSites = uniqueNonEmptyStrings(sites.map((site) => site.id)).map((siteId) => {
+    const site = sites.find((candidate) => candidate.id === siteId);
+    return {
+      id: siteId,
+      name: site?.name?.trim() || `Site ${siteId}`,
+    };
+  });
+  if (selectedSites.length === 0) {
+    return withNoSiteScope(values);
+  }
+
+  const hadAllMinersSelected = hasAllMinersSelected(values);
+  const hasSelectedMiners = !hadAllMinersSelected && getExplicitMinerCount(values) > 0;
+  const firstSite = selectedSites[0];
+
+  return {
+    ...values,
+    scopeType: hasSelectedMiners ? "explicitMiners" : "site",
+    scopeId: getSiteScopeLabel(selectedSites),
+    siteSelection: "site",
+    siteId: firstSite.id,
+    siteIds: selectedSites.map((site) => site.id),
+    siteNamesById: createSiteNamesById(selectedSites),
+    deviceSetIds: [],
+    deviceIdentifiers: hadAllMinersSelected ? [] : values.deviceIdentifiers,
+    minerSelectionMode: "subset",
   };
 }
 
 function withResponseProfileScope(values: CurtailmentFormValues): CurtailmentFormValues {
-  const siteId = getValidSiteScopeId(values.siteId);
+  const siteIds = getSelectedSiteIds(values);
 
-  if (values.scopeType === "site" && siteId) {
-    return withSiteScope(values, siteId, values.scopeId);
+  if (hasAllMinersSelected(values)) {
+    return withAllMinerScope(values);
+  }
+
+  if (values.siteSelection === "allSites") {
+    return withAllSitesScope(values);
+  }
+
+  if (values.siteSelection === "site" && siteIds.length > 0) {
+    return withSiteScopes(
+      values,
+      siteIds.map((siteId) => ({
+        id: siteId,
+        name: getSiteNameForId(values, siteId),
+      })),
+    );
+  }
+
+  if (getExplicitMinerCount(values) > 0) {
+    return {
+      ...values,
+      scopeType: "explicitMiners",
+      scopeId: undefined,
+      siteSelection: "none",
+      siteId: "",
+      siteIds: [],
+      siteNamesById: {},
+      deviceSetIds: [],
+    };
   }
 
   return withWholeFleetScope(values);
+}
+
+function withDefaultSiteScope(
+  values: CurtailmentFormValues,
+  defaultSiteScope?: CurtailmentSiteOption,
+): CurtailmentFormValues {
+  return defaultSiteScope && !hasSelectedCurtailmentTarget(values)
+    ? withSiteScopes(values, [defaultSiteScope])
+    : values;
 }
 
 function hasResponseProfileScopeValues(responseProfileValues: CurtailmentResponseProfileOption["values"]): boolean {
   return (
     "scopeType" in responseProfileValues ||
     "scopeId" in responseProfileValues ||
+    "siteSelection" in responseProfileValues ||
     "siteId" in responseProfileValues ||
+    "siteIds" in responseProfileValues ||
+    "siteNamesById" in responseProfileValues ||
     "deviceSetIds" in responseProfileValues ||
-    "deviceIdentifiers" in responseProfileValues
+    "deviceIdentifiers" in responseProfileValues ||
+    "minerSelectionMode" in responseProfileValues
   );
 }
 
@@ -254,9 +471,13 @@ function removeResponseProfileScopeValues(
 
   delete behaviorValues.scopeType;
   delete behaviorValues.scopeId;
+  delete behaviorValues.siteSelection;
   delete behaviorValues.siteId;
+  delete behaviorValues.siteIds;
+  delete behaviorValues.siteNamesById;
   delete behaviorValues.deviceSetIds;
   delete behaviorValues.deviceIdentifiers;
+  delete behaviorValues.minerSelectionMode;
 
   return behaviorValues;
 }
@@ -278,20 +499,39 @@ function withSelectedResponseProfileValues(
     return nextValues;
   }
 
-  const siteId = getValidSiteScopeId(responseProfileValues.siteId);
+  const siteIds = getValidSiteScopeIds(responseProfileValues.siteIds, responseProfileValues.siteId);
+  const deviceIdentifiers = responseProfileValues.deviceIdentifiers ?? [];
+  const minerSelectionMode = responseProfileValues.minerSelectionMode ?? "subset";
+  const siteSelection = responseProfileValues.siteSelection ?? (siteIds.length > 0 ? "site" : "none");
   const scopeType =
     responseProfileValues.scopeType ??
-    (siteId
-      ? "site"
-      : responseProfileValues.deviceSetIds?.length
-        ? "deviceSet"
-        : responseProfileValues.deviceIdentifiers?.length
-          ? "explicitMiners"
-          : "wholeOrg");
+    (siteSelection === "allSites"
+      ? "wholeOrg"
+      : siteIds.length > 0
+        ? "site"
+        : responseProfileValues.deviceSetIds?.length
+          ? "deviceSet"
+          : deviceIdentifiers.length
+            ? "explicitMiners"
+            : "wholeOrg");
 
-  if (scopeType === "site") {
-    if (siteId) {
-      return withSiteScope(nextValues, siteId, responseProfileValues.scopeId);
+  if (minerSelectionMode === "all") {
+    return withAllMinerScope({ ...nextValues, deviceIdentifiers: [], minerSelectionMode });
+  }
+
+  if (siteSelection === "allSites") {
+    return withAllSitesScope({ ...nextValues, deviceIdentifiers, minerSelectionMode });
+  }
+
+  if (scopeType === "site" || siteSelection === "site") {
+    if (siteIds.length > 0) {
+      return withSiteScopes(
+        { ...nextValues, deviceIdentifiers, minerSelectionMode },
+        siteIds.map((siteId) => ({
+          id: siteId,
+          name: getSiteNameForId(responseProfileValues, siteId),
+        })),
+      );
     }
 
     return withWholeFleetScope(nextValues);
@@ -306,9 +546,13 @@ function withSelectedResponseProfileValues(
       ...nextValues,
       scopeType,
       scopeId: undefined,
+      siteSelection: "none",
       siteId: "",
+      siteIds: [],
+      siteNamesById: {},
       deviceSetIds: [],
-      deviceIdentifiers: responseProfileValues.deviceIdentifiers ?? [],
+      deviceIdentifiers,
+      minerSelectionMode,
     };
   }
 
@@ -322,13 +566,21 @@ function isCurtailmentMode(value: string): value is CurtailmentMode {
 function getInitialValues(
   initialValues?: Partial<CurtailmentFormValues>,
   variant: CurtailmentStartModalVariant = "curtailment",
+  defaultSiteScope?: CurtailmentSiteOption,
 ): CurtailmentFormValues {
   const values = {
     ...defaultValues,
     ...initialValues,
   };
+  if (initialValues?.siteSelection === undefined && getValidSiteScopeIds(values.siteIds, values.siteId).length > 0) {
+    values.siteSelection = "site";
+  }
 
-  return variant === "responseProfile" ? withResponseProfileScope(values) : values;
+  const valuesWithDefaultSiteScope = withDefaultSiteScope(values, defaultSiteScope);
+
+  return variant === "responseProfile"
+    ? withResponseProfileScope(valuesWithDefaultSiteScope)
+    : valuesWithDefaultSiteScope;
 }
 
 function parseRequiredPositiveNumberField(value: string, fieldLabel: string): ParsedNumberField {
@@ -478,6 +730,28 @@ function Section({ title, subtext, children }: SectionProps): ReactElement {
   );
 }
 
+function SiteScopeOption({
+  disabled = false,
+  isSelected,
+  label,
+  onChange,
+  testId,
+}: SiteScopeOptionProps): ReactElement {
+  return (
+    <label
+      className={`flex w-full items-center gap-3 rounded-md px-2 py-2.5 text-left text-300 ${
+        disabled
+          ? "cursor-not-allowed text-text-primary-50"
+          : "hover:bg-surface-base-hover focus-visible:bg-surface-base-hover text-text-primary"
+      }`}
+      data-testid={testId}
+    >
+      <Checkbox checked={isSelected} disabled={disabled} onChange={onChange} />
+      <span className="min-w-0 truncate">{label}</span>
+    </label>
+  );
+}
+
 interface FieldInfoToggleProps {
   ariaLabel: string;
   body: string;
@@ -608,9 +882,7 @@ function PreviewPane({
         </div>
 
         <div className="grid gap-2">
-          <div className="text-heading-100 text-text-primary">
-            Curtail {preview.selectedMinerCount} miners {preview.scopeLabel} immediately
-          </div>
+          <div className="text-heading-100 text-text-primary">{formatCurtailmentPreviewSummary(preview)}</div>
           <div className="text-heading-100 text-text-primary-50">
             {preview.curtailEstimate} to curtail, {preview.restoreEstimate} to restore
           </div>
@@ -621,15 +893,15 @@ function PreviewPane({
 }
 
 function getSelectedMinerIds(values: CurtailmentFormValues): string[] {
-  if (values.scopeType !== "explicitMiners") {
-    return [];
-  }
-
-  return values.deviceIdentifiers;
+  return hasAllMinersSelected(values) ? [] : values.deviceIdentifiers;
 }
 
 function formatCountLabel(count: number, singular: string): string {
   return getTargetButtonLabel(count, singular);
+}
+
+function formatCurtailmentPreviewSummary(preview: CurtailmentPlanPreview): string {
+  return `Curtail ${formatCountLabel(preview.selectedMinerCount, "miner").toLowerCase()} ${preview.scopeLabel} immediately`;
 }
 
 function formatScopeLabelForSentence(scopeLabel: string): string {
@@ -637,16 +909,38 @@ function formatScopeLabelForSentence(scopeLabel: string): string {
 }
 
 function formatCurtailmentConfirmationTarget(values: CurtailmentFormValues, selectedMinerCount?: number): string {
-  if (values.scopeType === "explicitMiners") {
-    return formatCountLabel(values.deviceIdentifiers.length, "miner").toLowerCase();
+  const selectedSiteIds = getSiteScopeIds(values);
+  if (hasAllMinersSelected(values) || (values.siteSelection === "allSites" && selectedSiteIds.length === 0)) {
+    return "the whole fleet";
+  }
+
+  const selectedMiners =
+    getExplicitMinerCount(values) > 0 ? formatCountLabel(values.deviceIdentifiers.length, "miner").toLowerCase() : "";
+  const selectedSiteLabel =
+    values.siteSelection === "allSites"
+      ? "all sites"
+      : selectedSiteIds.length === 1
+        ? values.scopeId
+        : formatCountLabel(selectedSiteIds.length, "site").toLowerCase();
+  const selectedSite =
+    selectedSiteIds.length > 0
+      ? `miners in ${selectedSiteLabel ? formatScopeLabelForSentence(selectedSiteLabel) : "the selected sites"}`
+      : "";
+
+  if (selectedMiners && selectedSite) {
+    return `${selectedMiners} and ${selectedSite}`;
+  }
+
+  if (selectedMiners) {
+    return selectedMiners;
   }
 
   if (values.scopeType === "deviceSet") {
     return `miners in ${formatCountLabel(values.deviceSetIds.length, "device set").toLowerCase()}`;
   }
 
-  if (values.scopeType === "site") {
-    return `miners in ${values.scopeId ? formatScopeLabelForSentence(values.scopeId) : "the selected site"}`;
+  if (selectedSite) {
+    return selectedSite;
   }
 
   if (values.curtailmentMode === "fullFleet") {
@@ -681,38 +975,39 @@ function getCurtailmentConfirmationCopy(
   };
 }
 
-function getApplyToTarget(values: CurtailmentFormValues, shouldUseFormScope: boolean): ApplyToTarget {
-  if (!shouldUseFormScope) {
+function getMinerApplyToTarget(values: CurtailmentFormValues): ApplyToTarget {
+  return {
+    label: "Miners",
+    value: hasAllMinersSelected(values)
+      ? "All miners"
+      : values.deviceIdentifiers.length > 0
+        ? formatCountLabel(values.deviceIdentifiers.length, "miner")
+        : getTargetButtonLabel(0, "miner"),
+  };
+}
+
+function getSiteApplyToTarget(values: CurtailmentFormValues): ApplyToTarget {
+  const selectedSiteIds = getSelectedSiteIds(values);
+  if (selectedSiteIds.length > 0) {
     return {
-      label: "Miners",
-      value: getTargetButtonLabel(getSelectedMinerIds(values).length, "miner"),
+      label: "Sites",
+      value:
+        selectedSiteIds.length === 1
+          ? (values.scopeId ?? `Site ${selectedSiteIds[0]}`)
+          : formatCountLabel(selectedSiteIds.length, "site"),
     };
   }
 
-  if (values.scopeType === "site") {
+  if (values.siteSelection === "allSites") {
     return {
-      label: "Site",
-      value: values.scopeId ?? (values.siteId ? `Site ${values.siteId}` : "Site"),
-    };
-  }
-
-  if (values.scopeType === "deviceSet") {
-    return {
-      label: "Device sets",
-      value: formatCountLabel(values.deviceSetIds.length, "device set"),
-    };
-  }
-
-  if (values.scopeType === "wholeOrg") {
-    return {
-      label: "Miners",
-      value: getTargetButtonLabel(0, "miner"),
+      label: "Sites",
+      value: "All sites",
     };
   }
 
   return {
-    label: "Miners",
-    value: formatCountLabel(values.deviceIdentifiers.length, "miner"),
+    label: "Sites",
+    value: "Select",
   };
 }
 
@@ -758,6 +1053,7 @@ function CurtailmentStartModalContent({
   initialValues,
   responseProfiles = [],
   siteOptions = [],
+  defaultSiteScope,
   siteScopeEnabled = true,
   isSiteScopeLoading = false,
   siteScopeDisabledReason,
@@ -769,7 +1065,9 @@ function CurtailmentStartModalContent({
   isTestingCurtailment = false,
   isDeleting = false,
 }: CurtailmentStartModalProps): ReactElement {
-  const [initialFormValues] = useState<CurtailmentFormValues>(() => getInitialValues(initialValues, variant));
+  const [initialFormValues] = useState<CurtailmentFormValues>(() =>
+    getInitialValues(initialValues, variant, defaultSiteScope),
+  );
   const [values, setValues] = useState<CurtailmentFormValues>(() => initialFormValues);
   const [showMaintenanceConfirmation, setShowMaintenanceConfirmation] = useState(false);
   const [maintenanceInclusionConfirmed, setMaintenanceInclusionConfirmed] = useState(false);
@@ -779,6 +1077,8 @@ function CurtailmentStartModalContent({
   const [pendingCurtailmentConfirmation, setPendingCurtailmentConfirmation] =
     useState<PendingCurtailmentConfirmation | null>(null);
   const [showMinerSelectionModal, setShowMinerSelectionModal] = useState(false);
+  const [showSiteScopeModal, setShowSiteScopeModal] = useState(false);
+  const [draftSelectedSiteIds, setDraftSelectedSiteIds] = useState<string[]>([]);
   const [editedFields, setEditedFields] = useState<ReadonlySet<keyof CurtailmentFormValues>>(() => new Set());
   const isEditMode = mode === "edit";
   const isResponseProfileVariant = variant === "responseProfile";
@@ -830,18 +1130,24 @@ function CurtailmentStartModalContent({
   }, [editedFields, localErrors]);
   const effectiveErrors = { ...errors, ...visibleLocalErrors };
   const canSelectSiteScope = siteScopeEnabled && !siteScopeDisabledReason;
-  const selectedSiteId = getValidSiteScopeId(values.siteId);
-  const selectedSiteOption = useMemo(
-    () => (selectedSiteId ? siteOptions.find((option) => option.id === selectedSiteId) : undefined),
-    [siteOptions, selectedSiteId],
-  );
+  const selectedSiteIds = useMemo(() => getSelectedSiteIds(values), [values]);
   const effectiveValues = useMemo(() => {
-    if (values.scopeType === "site" && selectedSiteOption) {
-      return withSiteScope(values, selectedSiteOption.id, selectedSiteOption.name);
+    if (values.siteSelection === "site" && selectedSiteIds.length > 0) {
+      const siteOptionsById = new Map(siteOptions.map((siteOption) => [siteOption.id, siteOption]));
+      return withSiteScopes(
+        values,
+        selectedSiteIds.map((siteId) => {
+          const selectedSiteOption = siteOptionsById.get(siteId);
+          return {
+            id: siteId,
+            name: selectedSiteOption?.name ?? getSiteNameForId(values, siteId),
+          };
+        }),
+      );
     }
 
     return values;
-  }, [selectedSiteOption, values]);
+  }, [selectedSiteIds, siteOptions, values]);
   const unsupportedDeviceSetPreviewError = getUnsupportedDeviceSetPreviewError(effectiveValues);
   const controlledPreviewValue = preview
     ? createCurtailmentPlanPreview(effectiveValues, {
@@ -875,10 +1181,8 @@ function CurtailmentStartModalContent({
   const isSubmitDisabled = isBusy || hasBlockingSubmitPreviewState || hasExternalFormError || !hasEditableChanges;
   const displayedPreviewState = isResponseProfileVariant ? responseProfilePreviewState(previewState) : previewState;
   const selectedMinerIds = getSelectedMinerIds(effectiveValues);
-  const applyToTarget = getApplyToTarget(
-    effectiveValues,
-    isLiveCurtailmentEditMode || effectiveValues.scopeType === "site",
-  );
+  const minerApplyToTarget = getMinerApplyToTarget(effectiveValues);
+  const siteApplyToTarget = getSiteApplyToTarget(effectiveValues);
   const isFullFleetMode = values.curtailmentMode === "fullFleet";
   const curtailmentBehaviorSubtext = isLiveCurtailmentEditMode
     ? undefined
@@ -926,36 +1230,36 @@ function CurtailmentStartModalContent({
       : "Close curtailment planner";
   const primaryButtonText = isResponseProfileVariant ? "Save profile" : isEditMode ? "Save" : "Run curtailment";
   const shouldShowResponseProfileSelector = !isResponseProfileVariant && !isEditMode;
-  const responseProfileSiteOptions = useMemo(() => {
+  const scopeSiteOptions = useMemo(() => {
     if (!canSelectSiteScope) {
       return [];
     }
 
     return siteOptions;
   }, [canSelectSiteScope, siteOptions]);
-  const responseProfileSiteOptionByRowId = useMemo(
-    () => new Map(responseProfileSiteOptions.map((siteOption) => [getSiteScopeRowId(siteOption.id), siteOption])),
-    [responseProfileSiteOptions],
+  const siteScopeOptionById = useMemo(
+    () => new Map(scopeSiteOptions.map((siteOption) => [siteOption.id, siteOption])),
+    [scopeSiteOptions],
   );
-  const responseProfileScopeRows = useMemo(() => {
-    const siteRows: ResponseProfileScopeRow[] = responseProfileSiteOptions.map((siteOption) => ({
+  const selectableSiteIds = useMemo(() => scopeSiteOptions.map((siteOption) => siteOption.id), [scopeSiteOptions]);
+  const draftSelectedSiteIdSet = useMemo(() => new Set(draftSelectedSiteIds), [draftSelectedSiteIds]);
+  const siteScopeRows = useMemo(() => {
+    const siteRows: SiteScopeRow[] = scopeSiteOptions.map((siteOption) => ({
       id: getSiteScopeRowId(siteOption.id),
-      text: siteOption.name,
-      subtext: "Site",
-      isSelected: effectiveValues.scopeType === "site" && effectiveValues.siteId === siteOption.id,
+      label: siteOption.name,
+      isSelected: draftSelectedSiteIdSet.has(siteOption.id),
       disabled: !canSelectSiteScope,
       "data-testid": `response-profile-scope-site-${siteOption.id}`,
     }));
-    const currentSiteId = values.scopeType === "site" ? selectedSiteId : undefined;
-    const shouldShowCurrentSiteFallback =
-      currentSiteId !== undefined && !responseProfileSiteOptionByRowId.has(getSiteScopeRowId(currentSiteId));
 
-    if (shouldShowCurrentSiteFallback) {
+    for (const currentSiteId of getSelectedSiteIds(values)) {
+      if (siteScopeOptionById.has(currentSiteId)) {
+        continue;
+      }
       siteRows.push({
         id: getSiteScopeRowId(currentSiteId),
-        text: values.scopeId || `Site ${currentSiteId}`,
-        subtext: siteScopeDisabledReason ?? "Saved site",
-        isSelected: true,
+        label: getSiteNameForId(values, currentSiteId),
+        isSelected: draftSelectedSiteIdSet.has(currentSiteId),
         disabled: true,
         "data-testid": `response-profile-scope-site-${currentSiteId}`,
       });
@@ -964,35 +1268,22 @@ function CurtailmentStartModalContent({
     if (siteRows.length === 0 && (isSiteScopeLoading || siteScopeDisabledReason)) {
       siteRows.push({
         id: "site-unavailable",
-        text: "Site",
-        subtext: isSiteScopeLoading ? "Loading sites..." : (siteScopeDisabledReason ?? "Site scope unavailable"),
+        label: isSiteScopeLoading ? "Loading sites..." : (siteScopeDisabledReason ?? "Site scope unavailable"),
         isSelected: false,
         disabled: true,
         "data-testid": "response-profile-scope-site-unavailable",
       });
     }
 
-    return [
-      {
-        id: wholeFleetScopeRowId,
-        text: "Whole fleet",
-        subtext: "All miners in the fleet",
-        isSelected: effectiveValues.scopeType !== "site",
-        "data-testid": "response-profile-scope-whole-fleet",
-      },
-      ...siteRows,
-    ];
+    return siteRows;
   }, [
     canSelectSiteScope,
-    effectiveValues.scopeType,
-    effectiveValues.siteId,
+    draftSelectedSiteIdSet,
     isSiteScopeLoading,
-    responseProfileSiteOptionByRowId,
-    responseProfileSiteOptions,
-    selectedSiteId,
+    scopeSiteOptions,
+    siteScopeOptionById,
     siteScopeDisabledReason,
-    values.scopeId,
-    values.scopeType,
+    values,
   ]);
   const responseProfileSelectOptions = useMemo(
     () => [
@@ -1029,35 +1320,96 @@ function CurtailmentStartModalContent({
     }));
   };
 
-  const handleResponseProfileScopeChange = (scopeRowId: string, isSelected: boolean) => {
-    if (!isSelected) {
-      return;
-    }
-
-    if (scopeRowId === wholeFleetScopeRowId) {
-      updateValues(withWholeFleetScope);
-      return;
-    }
-
-    const siteOption = responseProfileSiteOptionByRowId.get(scopeRowId);
-    if (!siteOption) {
-      return;
-    }
-
-    updateValues((current) => withSiteScope(current, siteOption.id, siteOption.name));
+  const openSiteScopeModal = () => {
+    const nextDraftSiteIds =
+      effectiveValues.siteSelection === "allSites" ? selectableSiteIds : getSelectedSiteIds(effectiveValues);
+    setDraftSelectedSiteIds(nextDraftSiteIds);
+    setShowSiteScopeModal(true);
   };
 
-  const handleMinerSelection = (deviceIdentifiers: string[]) => {
+  const handleSiteScopeToggle = (scopeRowId: string) => {
+    if (!scopeRowId.startsWith("site:")) {
+      return;
+    }
+
+    const siteId = scopeRowId.slice("site:".length);
+    setDraftSelectedSiteIds((current) => {
+      const next = new Set(current);
+
+      if (next.has(siteId)) {
+        next.delete(siteId);
+      } else {
+        next.add(siteId);
+      }
+
+      return [...next];
+    });
+  };
+
+  const handleSaveSiteScope = () => {
+    const selectedSiteIdsForSave = getValidSiteScopeIds(draftSelectedSiteIds);
+    const allSelectableSitesSelected =
+      selectableSiteIds.length > 0 &&
+      selectedSiteIdsForSave.length === selectableSiteIds.length &&
+      selectedSiteIdsForSave.every((siteId) => siteScopeOptionById.has(siteId));
+
+    updateValues(
+      (current) => {
+        if (selectedSiteIdsForSave.length === 0) {
+          return withNoSiteScope(current);
+        }
+
+        if (allSelectableSitesSelected) {
+          return withAllSitesScope(
+            current,
+            selectedSiteIdsForSave.map((siteId) => ({
+              id: siteId,
+              name: siteScopeOptionById.get(siteId)?.name ?? getSiteNameForId(current, siteId),
+            })),
+          );
+        }
+
+        return withSiteScopes(
+          current,
+          selectedSiteIdsForSave.map((siteId) => ({
+            id: siteId,
+            name: siteScopeOptionById.get(siteId)?.name ?? getSiteNameForId(current, siteId),
+          })),
+        );
+      },
+      { resetResponseProfileSelection: true },
+    );
+    setShowSiteScopeModal(false);
+  };
+
+  const handleMinerSelection = (selection: MinerSelectionValue) => {
+    if (selection.allSelected) {
+      updateValues(withAllMinerScope, { resetResponseProfileSelection: true });
+      return;
+    }
+
+    const deviceIdentifiers = selection.selectedMinerIds;
     const hasSelectedMiners = deviceIdentifiers.length > 0;
 
     updateValues(
-      (current) => ({
-        ...current,
-        scopeType: hasSelectedMiners ? "explicitMiners" : "wholeOrg",
-        scopeId: hasSelectedMiners ? undefined : "whole-org",
-        deviceSetIds: [],
-        deviceIdentifiers,
-      }),
+      (current) => {
+        const scopedCurrent = current;
+        const hasSelectedSite = getSiteScopeIds(scopedCurrent).length > 0;
+        return {
+          ...scopedCurrent,
+          scopeType: hasSelectedMiners ? "explicitMiners" : hasSelectedSite ? "site" : "wholeOrg",
+          scopeId: hasSelectedMiners
+            ? hasSelectedSite
+              ? scopedCurrent.scopeId
+              : undefined
+            : hasSelectedSite
+              ? scopedCurrent.scopeId
+              : "whole-org",
+          deviceSetIds: [],
+          deviceIdentifiers,
+          minerSelectionMode: "subset",
+        };
+      },
       { resetResponseProfileSelection: true },
     );
   };
@@ -1225,25 +1577,16 @@ function CurtailmentStartModalContent({
               </div>
             ) : null}
             {isResponseProfileVariant ? (
-              <>
-                <Section title="Profile" subtext={responseProfileDescription}>
-                  <Input
-                    id={nameFieldId}
-                    label={nameFieldLabel}
-                    initValue={values.reason}
-                    type="text"
-                    error={effectiveErrors.reason}
-                    onChange={(value) => updateValue("reason", value)}
-                  />
-                </Section>
-                <Section title="Apply to" subtext="Scope this response profile to the whole fleet or one site.">
-                  <SelectRowList
-                    selectRows={responseProfileScopeRows}
-                    type={selectTypes.radio}
-                    onChange={handleResponseProfileScopeChange}
-                  />
-                </Section>
-              </>
+              <Section title="Profile" subtext={responseProfileDescription}>
+                <Input
+                  id={nameFieldId}
+                  label={nameFieldLabel}
+                  initValue={values.reason}
+                  type="text"
+                  error={effectiveErrors.reason}
+                  onChange={(value) => updateValue("reason", value)}
+                />
+              </Section>
             ) : (
               <div className="grid gap-3">
                 {shouldShowResponseProfileSelector ? (
@@ -1403,21 +1746,25 @@ function CurtailmentStartModalContent({
               </div>
             </Section>
 
-            {!isResponseProfileVariant ? (
-              <Section
-                title="Apply to"
-                subtext="Applies to all miners by default. Use the options below to narrow the scope."
-              >
-                <div className="grid">
-                  <TargetSelectButton
-                    label={applyToTarget.label}
-                    value={applyToTarget.value}
-                    disabled={isLiveCurtailmentEditMode}
-                    onClick={() => setShowMinerSelectionModal(true)}
-                  />
-                </div>
-              </Section>
-            ) : null}
+            <Section
+              title="Apply to"
+              subtext="Applies to all miners by default. Use the options below to narrow the scope."
+            >
+              <div className="grid">
+                <TargetSelectButton
+                  label={siteApplyToTarget.label}
+                  value={siteApplyToTarget.value}
+                  disabled={isLiveCurtailmentEditMode}
+                  onClick={openSiteScopeModal}
+                />
+                <TargetSelectButton
+                  label={minerApplyToTarget.label}
+                  value={minerApplyToTarget.value}
+                  disabled={isLiveCurtailmentEditMode}
+                  onClick={() => setShowMinerSelectionModal(true)}
+                />
+              </div>
+            </Section>
 
             <label
               className={`flex items-start gap-3 text-left ${
@@ -1509,13 +1856,55 @@ function CurtailmentStartModalContent({
       {showMinerSelectionModal ? (
         <MinerSelectionModal
           open={showMinerSelectionModal}
+          allMinersSelected={hasAllMinersSelected(effectiveValues)}
           selectedMinerIds={selectedMinerIds}
           onDismiss={() => setShowMinerSelectionModal(false)}
-          onSave={(minerIds) => {
-            handleMinerSelection(minerIds);
+          onSave={(selection) => {
+            handleMinerSelection(selection);
             setShowMinerSelectionModal(false);
           }}
         />
+      ) : null}
+
+      {showSiteScopeModal ? (
+        <Modal
+          open={showSiteScopeModal}
+          title="Select sites"
+          divider={false}
+          buttons={[
+            {
+              text: "Done",
+              variant: variants.primary,
+              onClick: handleSaveSiteScope,
+              dismissModalOnClick: false,
+            },
+          ]}
+          onDismiss={() => setShowSiteScopeModal(false)}
+        >
+          <div className="flex flex-col">
+            {siteScopeRows.map((siteScopeRow) => (
+              <SiteScopeOption
+                key={siteScopeRow.id}
+                disabled={siteScopeRow.disabled}
+                isSelected={siteScopeRow.isSelected}
+                label={siteScopeRow.label}
+                testId={siteScopeRow["data-testid"]}
+                onChange={() => handleSiteScopeToggle(siteScopeRow.id)}
+              />
+            ))}
+            {siteScopeRows.some((siteScopeRow) => !siteScopeRow.disabled) ? (
+              <ModalSelectAllFooter
+                label={
+                  selectableSiteIds.length > 0 && draftSelectedSiteIds.length === selectableSiteIds.length
+                    ? `All ${selectableSiteIds.length} ${selectableSiteIds.length === 1 ? "site" : "sites"} selected`
+                    : `${draftSelectedSiteIds.length} ${draftSelectedSiteIds.length === 1 ? "site" : "sites"} selected`
+                }
+                onSelectAll={() => setDraftSelectedSiteIds(selectableSiteIds)}
+                onSelectNone={() => setDraftSelectedSiteIds([])}
+              />
+            ) : null}
+          </div>
+        </Modal>
       ) : null}
     </>
   );

@@ -95,9 +95,10 @@ type ListTargetsByEventPageParams struct {
 type ResponseProfileStore interface {
 	ListResponseProfiles(ctx context.Context, orgID int64) ([]*models.ResponseProfile, error)
 	GetResponseProfile(ctx context.Context, orgID, profileID int64) (*models.ResponseProfile, error)
+	ListResponseProfileDeviceSites(ctx context.Context, orgID int64, deviceIdentifiers []string) (map[string]*int64, error)
 	CreateResponseProfile(ctx context.Context, profile models.ResponseProfile) (*models.ResponseProfile, error)
-	UpdateResponseProfile(ctx context.Context, profile models.ResponseProfile, expectedSiteID *int64) (*models.ResponseProfile, error)
-	DeleteResponseProfile(ctx context.Context, orgID, profileID int64, expectedSiteID *int64) error
+	UpdateResponseProfile(ctx context.Context, profile models.ResponseProfile, expectedSiteID *int64, expectedScopeJSON []byte) (*models.ResponseProfile, error)
+	DeleteResponseProfile(ctx context.Context, orgID, profileID int64, expectedSiteID *int64, expectedScopeJSON []byte) error
 	CountAutomationRulesByResponseProfile(ctx context.Context, orgID, profileID int64) (int64, error)
 	SiteBelongsToOrg(ctx context.Context, orgID, siteID int64) (bool, error)
 }
@@ -122,19 +123,20 @@ type AutomationStore interface {
 	RecordAutomationExecutionError(ctx context.Context, ruleID int64, message string, at time.Time) error
 }
 
-// ListCandidatesParams scopes selector candidate reads. A nil SiteID and
-// empty DeviceIdentifiers means whole-org.
+// ListCandidatesParams scopes selector candidate reads. Empty SiteIDs and
+// DeviceIdentifiers means whole-org. When both are present, results are the
+// union of matching sites and explicit device identifiers.
 type ListCandidatesParams struct {
 	OrgID             int64
 	DeviceIdentifiers []string
-	SiteID            *int64
+	SiteIDs           []int64
 }
 
 type ListRecentlyResolvedCurtailedDevicesParams struct {
 	OrgID             int64
 	CooldownSec       int32
 	DeviceIdentifiers []string
-	SiteID            *int64
+	SiteIDs           []int64
 }
 
 // UpdateOperatorFieldsParams carries the optional patch fields for a
@@ -211,6 +213,9 @@ type CurtailmentStore interface {
 
 	ListTargetsByEvent(ctx context.Context, orgID int64, eventUUID uuid.UUID) ([]*models.Target, error)
 	ListTargetsByEventPage(ctx context.Context, params ListTargetsByEventPageParams) ([]*models.Target, string, error)
+	// ListTargetSiteIDsByEvent returns distinct mapped target sites and whether
+	// site coverage is complete. Events with zero target rows are complete; callers
+	// can then derive any required site context from the persisted event scope.
 	ListTargetSiteIDsByEvent(ctx context.Context, orgID int64, eventUUID uuid.UUID) ([]int64, bool, error)
 	GetTargetRollupByEvent(ctx context.Context, orgID int64, eventUUID uuid.UUID) (*models.TargetRollup, error)
 

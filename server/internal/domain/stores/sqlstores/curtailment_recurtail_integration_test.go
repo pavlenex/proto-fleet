@@ -363,6 +363,126 @@ func TestSQLCurtailmentStore_ClosedLoopScopeHierarchyConflicts(t *testing.T) {
 	assert.True(t, fleeterror.IsAlreadyExistsError(err), "site watcher must block org starts, got %v", err)
 }
 
+func TestSQLCurtailmentStore_ClosedLoopMixedSiteScopeHierarchyConflicts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping database integration test in short mode")
+	}
+
+	testContext := testutil.InitializeDBServiceInfrastructure(t)
+	user := testContext.DatabaseService.CreateSuperAdminUser()
+	db := testContext.DatabaseService.DB
+	ctx := t.Context()
+	store := sqlstores.NewSQLCurtailmentStore(db)
+	siteStore := sqlstores.NewSQLSiteStore(db)
+
+	siteA, err := siteStore.CreateSite(ctx, sitesmodels.CreateSiteParams{OrgID: user.OrganizationID, Name: "mixed-site-a"})
+	require.NoError(t, err)
+	siteB, err := siteStore.CreateSite(ctx, sitesmodels.CreateSiteParams{OrgID: user.OrganizationID, Name: "mixed-site-b"})
+	require.NoError(t, err)
+	siteC, err := siteStore.CreateSite(ctx, sitesmodels.CreateSiteParams{OrgID: user.OrganizationID, Name: "mixed-site-c"})
+	require.NoError(t, err)
+
+	mixedSites := curtailmentStoreClosedLoopFullFleetEvent(
+		user.OrganizationID,
+		user.DatabaseID,
+		uuid.New(),
+		models.ScopeTypeMixed,
+		0,
+		"mixed-sites",
+	)
+	mixedSites.ScopeJSON = []byte(fmt.Sprintf(
+		`{"site_ids":[%d,%d],"device_identifiers":null}`,
+		siteA.ID,
+		siteB.ID,
+	))
+	_, err = store.InsertEventWithTargets(ctx, mixedSites, nil)
+	require.NoError(t, err)
+
+	_, err = store.InsertEventWithTargets(
+		ctx,
+		curtailmentStoreClosedLoopFullFleetEvent(user.OrganizationID, user.DatabaseID, uuid.New(), models.ScopeTypeSite, siteA.ID, "site-a-blocked-by-mixed"),
+		nil,
+	)
+	require.Error(t, err)
+	assert.True(t, fleeterror.IsAlreadyExistsError(err), "mixed site watcher must block overlapping site starts, got %v", err)
+
+	overlappingMixed := curtailmentStoreClosedLoopFullFleetEvent(
+		user.OrganizationID,
+		user.DatabaseID,
+		uuid.New(),
+		models.ScopeTypeMixed,
+		0,
+		"mixed-site-overlap",
+	)
+	overlappingMixed.ScopeJSON = []byte(fmt.Sprintf(
+		`{"site_ids":[%d,%d],"device_identifiers":null}`,
+		siteB.ID,
+		siteC.ID,
+	))
+	_, err = store.InsertEventWithTargets(ctx, overlappingMixed, nil)
+	require.Error(t, err)
+	assert.True(t, fleeterror.IsAlreadyExistsError(err), "mixed site watcher must block overlapping mixed starts, got %v", err)
+
+	_, err = store.InsertEventWithTargets(
+		ctx,
+		curtailmentStoreClosedLoopFullFleetEvent(user.OrganizationID, user.DatabaseID, uuid.New(), models.ScopeTypeSite, siteC.ID, "site-c-allowed"),
+		nil,
+	)
+	require.NoError(t, err)
+
+	_, err = store.InsertEventWithTargets(
+		ctx,
+		curtailmentStoreClosedLoopFullFleetEvent(user.OrganizationID, user.DatabaseID, uuid.New(), models.ScopeTypeWholeOrg, 0, "org-blocked-by-mixed"),
+		nil,
+	)
+	require.Error(t, err)
+	assert.True(t, fleeterror.IsAlreadyExistsError(err), "mixed site watcher must block org starts, got %v", err)
+}
+
+func TestSQLCurtailmentStore_ListActiveCurtailedDevicesIncludesTargetlessMixedSites(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping database integration test in short mode")
+	}
+
+	testContext := testutil.InitializeDBServiceInfrastructure(t)
+	user := testContext.DatabaseService.CreateSuperAdminUser()
+	db := testContext.DatabaseService.DB
+	ctx := t.Context()
+	store := sqlstores.NewSQLCurtailmentStore(db)
+	siteStore := sqlstores.NewSQLSiteStore(db)
+
+	deviceIDs := testContext.DatabaseService.CreateTestMiners(user.OrganizationID, 3, "https://172.17.0.1:80")
+	siteA, err := siteStore.CreateSite(ctx, sitesmodels.CreateSiteParams{OrgID: user.OrganizationID, Name: "active-site-a"})
+	require.NoError(t, err)
+	siteB, err := siteStore.CreateSite(ctx, sitesmodels.CreateSiteParams{OrgID: user.OrganizationID, Name: "active-site-b"})
+	require.NoError(t, err)
+
+	_, err = siteStore.AssignDevicesToSite(ctx, user.OrganizationID, &siteA.ID, deviceIDs[:1])
+	require.NoError(t, err)
+	_, err = siteStore.AssignDevicesToSite(ctx, user.OrganizationID, &siteB.ID, deviceIDs[1:2])
+	require.NoError(t, err)
+
+	mixedSites := curtailmentStoreClosedLoopFullFleetEvent(
+		user.OrganizationID,
+		user.DatabaseID,
+		uuid.New(),
+		models.ScopeTypeMixed,
+		0,
+		"mixed-active-devices",
+	)
+	mixedSites.ScopeJSON = []byte(fmt.Sprintf(
+		`{"site_ids":[%d,%d],"device_identifiers":null}`,
+		siteA.ID,
+		siteB.ID,
+	))
+	_, err = store.InsertEventWithTargets(ctx, mixedSites, nil)
+	require.NoError(t, err)
+
+	got, err := store.ListActiveCurtailedDevices(ctx, user.OrganizationID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, deviceIDs[:2], got)
+}
+
 func TestSQLCurtailmentStore_FixedKwDoesNotBlockClosedLoopScope(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping database integration test in short mode")

@@ -394,15 +394,63 @@ WHERE org_id = $1
   AND (
     (
       $4::TEXT = 'whole_org'
-      AND scope_type IN ('whole_org', 'site')
+      AND (
+        scope_type IN ('whole_org', 'site')
+        OR (
+          scope_type = 'mixed'
+          AND jsonb_array_length(
+            CASE WHEN jsonb_typeof(scope_jsonb->'site_ids') = 'array'
+              THEN scope_jsonb->'site_ids'
+              ELSE '[]'::jsonb
+            END
+          ) > 0
+          AND jsonb_array_length(
+            CASE WHEN jsonb_typeof(scope_jsonb->'device_identifiers') = 'array'
+              THEN scope_jsonb->'device_identifiers'
+              ELSE '[]'::jsonb
+            END
+          ) = 0
+          AND jsonb_array_length(
+            CASE WHEN jsonb_typeof(scope_jsonb->'device_set_ids') = 'array'
+              THEN scope_jsonb->'device_set_ids'
+              ELSE '[]'::jsonb
+            END
+          ) = 0
+        )
+      )
     )
     OR (
-      $4::TEXT = 'site'
+      $4::TEXT IN ('site', 'mixed')
       AND (
         scope_type = 'whole_org'
         OR (
           scope_type = 'site'
-          AND scope_jsonb->>'site_id' = $5::TEXT
+          AND (scope_jsonb->>'site_id')::BIGINT = ANY($5::BIGINT[])
+        )
+        OR (
+          scope_type = 'mixed'
+          AND jsonb_array_length(
+            CASE WHEN jsonb_typeof(scope_jsonb->'device_identifiers') = 'array'
+              THEN scope_jsonb->'device_identifiers'
+              ELSE '[]'::jsonb
+            END
+          ) = 0
+          AND jsonb_array_length(
+            CASE WHEN jsonb_typeof(scope_jsonb->'device_set_ids') = 'array'
+              THEN scope_jsonb->'device_set_ids'
+              ELSE '[]'::jsonb
+            END
+          ) = 0
+          AND EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(
+              CASE WHEN jsonb_typeof(scope_jsonb->'site_ids') = 'array'
+                THEN scope_jsonb->'site_ids'
+                ELSE '[]'::jsonb
+              END
+            ) AS existing_site_id(site_id)
+            WHERE existing_site_id.site_id::BIGINT = ANY($5::BIGINT[])
+          )
         )
       )
     )
@@ -414,19 +462,19 @@ type CountCurtailmentScopeConflictsParams struct {
 	Mode      string
 	LoopType  string
 	ScopeType string
-	SiteID    string
+	SiteIds   []int64
 }
 
-// Hierarchy for currently supported scopes: org > site.
-// A new whole-org event conflicts with existing whole-org or site events.
-// A new site event conflicts with existing whole-org or same-site events.
+// Hierarchy for currently supported closed-loop scopes: org > site.
+// A new whole-org event conflicts with existing whole-org, site, or site-only mixed events.
+// A new site or site-only mixed event conflicts with existing whole-org or overlapping site ownership.
 func (q *Queries) CountCurtailmentScopeConflicts(ctx context.Context, arg CountCurtailmentScopeConflictsParams) (int64, error) {
 	row := q.queryRow(ctx, q.countCurtailmentScopeConflictsStmt, countCurtailmentScopeConflicts,
 		arg.OrgID,
 		arg.Mode,
 		arg.LoopType,
 		arg.ScopeType,
-		arg.SiteID,
+		pq.Array(arg.SiteIds),
 	)
 	var column_1 int64
 	err := row.Scan(&column_1)
@@ -1162,6 +1210,36 @@ JOIN device d ON d.org_id = ce.org_id
             ce.scope_type = 'site'
             AND d.site_id = (ce.scope_jsonb->>'site_id')::BIGINT
         )
+        OR (
+            ce.scope_type = 'mixed'
+            AND d.site_id IN (
+                SELECT mixed_site.site_id::BIGINT
+                FROM jsonb_array_elements_text(
+                    CASE WHEN jsonb_typeof(ce.scope_jsonb->'site_ids') = 'array'
+                      THEN ce.scope_jsonb->'site_ids'
+                      ELSE '[]'::jsonb
+                    END
+                ) AS mixed_site(site_id)
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements_text(
+                    CASE WHEN jsonb_typeof(ce.scope_jsonb->'device_identifiers') = 'array'
+                      THEN ce.scope_jsonb->'device_identifiers'
+                      ELSE '[]'::jsonb
+                    END
+                ) AS mixed_device(device_identifier)
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements_text(
+                    CASE WHEN jsonb_typeof(ce.scope_jsonb->'device_set_ids') = 'array'
+                      THEN ce.scope_jsonb->'device_set_ids'
+                      ELSE '[]'::jsonb
+                    END
+                ) AS mixed_device_set(device_set_id)
+            )
+        )
     )
 WHERE ce.org_id = $1
     AND ce.state IN ('pending', 'active', 'restoring')
@@ -1402,19 +1480,22 @@ LEFT JOIN latest_hourly lh ON lh.device_identifier = d.device_identifier
 WHERE d.org_id = $1
     AND d.deleted_at IS NULL
     AND (
-        $2::bigint IS NULL
-        OR d.site_id = $2::bigint
-    )
-    AND (
-        $3::text[] IS NULL
-        OR d.device_identifier = ANY($3::text[])
+        ($2::BIGINT[] IS NULL AND $3::text[] IS NULL)
+        OR (
+            $2::BIGINT[] IS NOT NULL
+            AND d.site_id = ANY($2::BIGINT[])
+        )
+        OR (
+            $3::text[] IS NOT NULL
+            AND d.device_identifier = ANY($3::text[])
+        )
     )
 ORDER BY d.device_identifier
 `
 
 type ListCurtailmentCandidatesByOrgParams struct {
 	OrgID             int64
-	SiteID            sql.NullInt64
+	SiteIds           []int64
 	DeviceIdentifiers []string
 }
 
@@ -1432,10 +1513,10 @@ type ListCurtailmentCandidatesByOrgRow struct {
 
 // Per-device state for the selector. Returns every in-scope device;
 // service applies skip-reason attribution. nil power/hash = stale
-// (15-min window). device_identifiers nil = whole-org.
+// (15-min window). site_ids and device_identifiers nil = whole-org.
 // Stable order so the selector's stable sort is deterministic on ties.
 func (q *Queries) ListCurtailmentCandidatesByOrg(ctx context.Context, arg ListCurtailmentCandidatesByOrgParams) ([]ListCurtailmentCandidatesByOrgRow, error) {
-	rows, err := q.query(ctx, q.listCurtailmentCandidatesByOrgStmt, listCurtailmentCandidatesByOrg, arg.OrgID, arg.SiteID, pq.Array(arg.DeviceIdentifiers))
+	rows, err := q.query(ctx, q.listCurtailmentCandidatesByOrgStmt, listCurtailmentCandidatesByOrg, arg.OrgID, pq.Array(arg.SiteIds), pq.Array(arg.DeviceIdentifiers))
 	if err != nil {
 		return nil, err
 	}
@@ -1959,9 +2040,8 @@ WITH scoped_devices AS MATERIALIZED (
     FROM device d
     WHERE d.org_id = $1
         AND d.deleted_at IS NULL
-        AND $3::text[] IS NULL
-        AND $4::BIGINT IS NOT NULL
-        AND d.site_id = $4::BIGINT
+        AND $4::BIGINT[] IS NOT NULL
+        AND d.site_id = ANY($4::BIGINT[])
 )
 SELECT DISTINCT ct.device_identifier
 FROM scoped_devices sd
@@ -1979,7 +2059,7 @@ type ListRecentlyResolvedCurtailedDevicesByScopeParams struct {
 	OrgID             int64
 	CooldownSec       int32
 	DeviceIdentifiers []string
-	SiteID            sql.NullInt64
+	SiteIds           []int64
 }
 
 // Scoped cooldown lookup: enumerate the request's live candidate devices first,
@@ -1989,7 +2069,7 @@ func (q *Queries) ListRecentlyResolvedCurtailedDevicesByScope(ctx context.Contex
 		arg.OrgID,
 		arg.CooldownSec,
 		pq.Array(arg.DeviceIdentifiers),
-		arg.SiteID,
+		pq.Array(arg.SiteIds),
 	)
 	if err != nil {
 		return nil, err
