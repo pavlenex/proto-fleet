@@ -51,6 +51,8 @@ type listStubStore struct {
 	lastTargetPageParams interfaces.ListTargetsByEventPageParams
 	lastGetOrgID         int64
 	lastGetUUID          uuid.UUID
+	coverageBatchCalls   int
+	lastCoverageBatch    []uuid.UUID
 }
 
 func (s *listStubStore) ListEvents(_ context.Context, params interfaces.ListEventsParams) ([]*models.Event, string, error) {
@@ -138,11 +140,39 @@ func (s *listStubStore) ListTargetsByEventPage(_ context.Context, params interfa
 	}
 	return s.targetsByUUID[params.EventUUID], s.targetNextPageToken, nil
 }
-func (s *listStubStore) ListTargetSiteIDsByEvent(_ context.Context, _ int64, eventUUID uuid.UUID) ([]int64, bool, error) {
+func (s *listStubStore) ListTargetSiteCoverageByEvent(_ context.Context, _ int64, eventUUID uuid.UUID) (models.TargetSiteCoverage, error) {
 	if s.targetSiteIDsByUUID == nil {
-		panic("ListTargetSiteIDsByEvent not exercised by List handler tests")
+		panic("ListTargetSiteCoverageByEvent not exercised by List handler tests")
 	}
-	return s.targetSiteIDsByUUID[eventUUID], !s.incompleteTargetSite[eventUUID], nil
+	siteIDs := append([]int64(nil), s.targetSiteIDsByUUID[eventUUID]...)
+	complete := !s.incompleteTargetSite[eventUUID]
+	mappedTargetCount := int64(len(siteIDs))
+	targetCount := mappedTargetCount
+	if !complete {
+		targetCount++
+	}
+	return models.TargetSiteCoverage{
+		SiteIDs:           siteIDs,
+		Complete:          complete,
+		TargetCount:       targetCount,
+		MappedTargetCount: mappedTargetCount,
+	}, nil
+}
+func (s *listStubStore) ListTargetSiteCoverageByEvents(_ context.Context, _ int64, eventUUIDs []uuid.UUID) (map[uuid.UUID]models.TargetSiteCoverage, error) {
+	if s.targetSiteIDsByUUID == nil {
+		panic("ListTargetSiteCoverageByEvents not exercised by List handler tests")
+	}
+	s.coverageBatchCalls++
+	s.lastCoverageBatch = append([]uuid.UUID(nil), eventUUIDs...)
+	coverageByEvent := make(map[uuid.UUID]models.TargetSiteCoverage, len(eventUUIDs))
+	for _, eventUUID := range eventUUIDs {
+		coverage, err := s.ListTargetSiteCoverageByEvent(context.Background(), 0, eventUUID)
+		if err != nil {
+			return nil, err
+		}
+		coverageByEvent[eventUUID] = coverage
+	}
+	return coverageByEvent, nil
 }
 func (s *listStubStore) GetTargetRollupByEvent(_ context.Context, _ int64, eventUUID uuid.UUID) (*models.TargetRollup, error) {
 	if s.targetRollupByUUID != nil {
@@ -543,6 +573,53 @@ func TestHandler_ListActiveCurtailments_FiltersDeviceListEventsByTargetSite(t *t
 	assert.Equal(t, allowedUUID.String(), resp.Msg.Events[0].EventUuid)
 }
 
+func TestHandler_ListActiveCurtailments_BatchesDeviceListTargetSiteCoverage(t *testing.T) {
+	t.Parallel()
+	const (
+		orgID     = int64(42)
+		firstSite = int64(7)
+	)
+	firstUUID := uuid.New()
+	secondUUID := uuid.New()
+	store := &listStubStore{
+		activeEvents: []*models.Event{
+			{
+				ID:        1,
+				EventUUID: firstUUID,
+				OrgID:     orgID,
+				State:     models.EventStateActive,
+				ScopeType: models.ScopeTypeDeviceList,
+				Reason:    "first-device",
+			},
+			{
+				ID:        2,
+				EventUUID: secondUUID,
+				OrgID:     orgID,
+				State:     models.EventStateActive,
+				ScopeType: models.ScopeTypeDeviceList,
+				Reason:    "second-device",
+			},
+		},
+		targetSiteIDsByUUID: map[uuid.UUID][]int64{
+			firstUUID:  {firstSite},
+			secondUUID: {},
+		},
+		incompleteTargetSite: map[uuid.UUID]bool{
+			secondUUID: true,
+		},
+	}
+	h := NewHandler(domainCurtailment.NewService(store))
+
+	resp, err := h.ListActiveCurtailments(sessionCtx(orgID), connect.NewRequest(&pb.ListActiveCurtailmentsRequest{}))
+	require.NoError(t, err)
+
+	require.Len(t, resp.Msg.Events, 2)
+	assert.Equal(t, 1, store.coverageBatchCalls)
+	assert.ElementsMatch(t, []uuid.UUID{firstUUID, secondUUID}, store.lastCoverageBatch)
+	assert.True(t, resp.Msg.Events[0].GetTargetSiteCoverage().GetComplete())
+	assert.False(t, resp.Msg.Events[1].GetTargetSiteCoverage().GetComplete())
+}
+
 func TestHandler_ListActiveCurtailments_AllowsDeviceListEventsWithIncompleteTargetSitesForOrgWideRead(t *testing.T) {
 	t.Parallel()
 	const orgID = int64(42)
@@ -570,6 +647,12 @@ func TestHandler_ListActiveCurtailments_AllowsDeviceListEventsWithIncompleteTarg
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.Events, 1)
 	assert.Equal(t, eventUUID.String(), resp.Msg.Events[0].EventUuid)
+	coverage := resp.Msg.Events[0].GetTargetSiteCoverage()
+	require.NotNil(t, coverage)
+	assert.False(t, coverage.GetComplete())
+	assert.Equal(t, uint32(1), coverage.GetTargetCount())
+	assert.Equal(t, uint32(0), coverage.GetMappedTargetCount())
+	assert.Equal(t, uint32(1), coverage.GetUnknownTargetCount())
 }
 
 func TestHandler_ListActiveCurtailments_FiltersDeviceListEventsWithIncompleteTargetSitesWhenOrgReadIsNarrowed(t *testing.T) {
@@ -735,11 +818,13 @@ func TestHandler_GetCurtailmentEvent_AllowsTargetlessDeviceListScope(t *testing.
 	}
 	h := NewHandler(domainCurtailment.NewService(store))
 
-	_, err := h.GetCurtailmentEvent(sessionCtx(orgID), connect.NewRequest(&pb.GetCurtailmentEventRequest{
+	resp, err := h.GetCurtailmentEvent(sessionCtx(orgID), connect.NewRequest(&pb.GetCurtailmentEventRequest{
 		EventUuid: eventUUID.String(),
 	}))
 
 	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, eventUUID.String(), resp.Msg.Event.EventUuid)
 	assert.Equal(t, eventUUID, store.lastTargetPageParams.EventUUID)
 }
 
@@ -1041,12 +1126,16 @@ func TestHandler_GetCurtailmentEvent_AllowsIncompleteTargetSitesForOrgWideRead(t
 	}
 	h := NewHandler(domainCurtailment.NewService(store))
 
-	_, err := h.GetCurtailmentEvent(sessionCtx(orgID), connect.NewRequest(&pb.GetCurtailmentEventRequest{
+	resp, err := h.GetCurtailmentEvent(sessionCtx(orgID), connect.NewRequest(&pb.GetCurtailmentEventRequest{
 		EventUuid: eventUUID.String(),
 	}))
 
 	require.NoError(t, err)
 	assert.Equal(t, eventUUID, store.lastTargetPageParams.EventUUID)
+	coverage := resp.Msg.Event.GetTargetSiteCoverage()
+	require.NotNil(t, coverage)
+	assert.False(t, coverage.GetComplete())
+	assert.Equal(t, uint32(1), coverage.GetUnknownTargetCount())
 }
 
 func TestHandler_GetCurtailmentEvent_UsesBoundedSnapshotAndFullTargetRollup(t *testing.T) {

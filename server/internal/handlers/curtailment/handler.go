@@ -164,7 +164,7 @@ func (h *Handler) UpdateCurtailmentEvent(ctx context.Context, req *connect.Reque
 	if err != nil {
 		return nil, err
 	}
-	info, _, err := h.requireEventPermission(ctx, authz.PermCurtailmentManage, eventUUID)
+	info, permissionEvent, err := h.requireEventPermission(ctx, authz.PermCurtailmentManage, eventUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -177,6 +177,7 @@ func (h *Handler) UpdateCurtailmentEvent(ctx context.Context, req *connect.Reque
 	if err != nil {
 		return nil, err
 	}
+	copyEventTargetSiteCoverage(event, permissionEvent)
 	targets, err := h.service.ListTargetsByEvent(ctx, info.OrganizationID, event.EventUUID)
 	if err != nil {
 		return nil, err
@@ -202,7 +203,7 @@ func (h *Handler) StopCurtailment(ctx context.Context, req *connect.Request[pb.S
 	if err != nil {
 		return nil, err
 	}
-	info, _, err := h.requireEventPermission(ctx, authz.PermCurtailmentManage, eventUUID)
+	info, permissionEvent, err := h.requireEventPermission(ctx, authz.PermCurtailmentManage, eventUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -216,6 +217,7 @@ func (h *Handler) StopCurtailment(ctx context.Context, req *connect.Request[pb.S
 	if err != nil {
 		return nil, err
 	}
+	copyEventTargetSiteCoverage(event, permissionEvent)
 	targets, err := h.service.ListTargetsByEvent(ctx, info.OrganizationID, event.EventUUID)
 	if err != nil {
 		return nil, err
@@ -272,7 +274,7 @@ func (h *Handler) GetCurtailmentEvent(ctx context.Context, req *connect.Request[
 	if err != nil {
 		return nil, err
 	}
-	info, _, err := h.requireEventPermission(ctx, authz.PermCurtailmentRead, eventUUID)
+	info, permissionEvent, err := h.requireEventPermission(ctx, authz.PermCurtailmentRead, eventUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -285,6 +287,7 @@ func (h *Handler) GetCurtailmentEvent(ctx context.Context, req *connect.Request[
 	if err != nil {
 		return nil, err
 	}
+	copyEventTargetSiteCoverage(event, permissionEvent)
 	return connect.NewResponse(&pb.GetCurtailmentEventResponse{
 		Event:               toEventProtoWithTargets(event, targets),
 		NextTargetPageToken: nextTargetPageToken,
@@ -308,7 +311,7 @@ func (h *Handler) AdminTerminateEvent(ctx context.Context, req *connect.Request[
 	if err != nil {
 		return nil, err
 	}
-	info, _, err := h.requireEventPermission(ctx, authz.PermCurtailmentManage, eventUUID)
+	info, permissionEvent, err := h.requireEventPermission(ctx, authz.PermCurtailmentManage, eventUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -323,6 +326,7 @@ func (h *Handler) AdminTerminateEvent(ctx context.Context, req *connect.Request[
 	if err != nil {
 		return nil, err
 	}
+	copyEventTargetSiteCoverage(event, permissionEvent)
 	targets, err := h.service.ListTargetsByEvent(ctx, info.OrganizationID, event.EventUUID)
 	if err != nil {
 		return nil, err
@@ -366,6 +370,7 @@ func (h *Handler) ForceReleaseCurtailmentOwnership(ctx context.Context, req *con
 	if err != nil {
 		return nil, err
 	}
+	copyEventTargetSiteCoverage(result.Event, event)
 	return connect.NewResponse(&pb.ForceReleaseCurtailmentOwnershipResponse{
 		Event:               toForceReleaseEventProto(result.Event),
 		ReleasedTargetCount: uint32SaturatingInt64(result.ReleasedTargetCount),
@@ -618,6 +623,15 @@ func (h *Handler) requireEventPermission(ctx context.Context, permission string,
 	return info, event, nil
 }
 
+func copyEventTargetSiteCoverage(dst, src *models.Event) {
+	if dst == nil || src == nil || src.TargetSiteCoverage == nil {
+		return
+	}
+	coverage := *src.TargetSiteCoverage
+	coverage.SiteIDs = append([]int64(nil), src.TargetSiteCoverage.SiteIDs...)
+	dst.TargetSiteCoverage = &coverage
+}
+
 func (h *Handler) requireForceReleasePermission(ctx context.Context, orgID int64, event *models.Event) error {
 	siteContexts, err := h.eventSiteResourceContexts(ctx, orgID, event)
 	if err != nil {
@@ -645,6 +659,9 @@ func (h *Handler) filterEventsByPermission(
 	permission string,
 	events []*models.Event,
 ) ([]*models.Event, error) {
+	if err := h.hydrateTargetSiteCoverageByEvents(ctx, orgID, events); err != nil {
+		return nil, err
+	}
 	filtered := make([]*models.Event, 0, len(events))
 	for _, event := range events {
 		siteContexts, err := h.eventSiteResourceContexts(ctx, orgID, event)
@@ -679,6 +696,56 @@ func (h *Handler) filterEventsByPermission(
 		}
 	}
 	return filtered, nil
+}
+
+func (h *Handler) hydrateTargetSiteCoverageByEvents(ctx context.Context, orgID int64, events []*models.Event) error {
+	eventUUIDs := make([]uuid.UUID, 0, len(events))
+	seen := make(map[uuid.UUID]struct{}, len(events))
+	for _, event := range events {
+		if !shouldBatchHydrateTargetSiteCoverage(event) {
+			continue
+		}
+		if _, ok := seen[event.EventUUID]; ok {
+			continue
+		}
+		seen[event.EventUUID] = struct{}{}
+		eventUUIDs = append(eventUUIDs, event.EventUUID)
+	}
+	if len(eventUUIDs) == 0 {
+		return nil
+	}
+	coverageByEvent, err := h.service.ListTargetSiteCoverageByEvents(ctx, orgID, eventUUIDs)
+	if err != nil {
+		return err
+	}
+	for _, event := range events {
+		if event == nil {
+			continue
+		}
+		coverage, ok := coverageByEvent[event.EventUUID]
+		if !ok {
+			continue
+		}
+		event.TargetSiteCoverage = &coverage
+	}
+	return nil
+}
+
+func shouldBatchHydrateTargetSiteCoverage(event *models.Event) bool {
+	if event == nil || event.TargetSiteCoverage != nil {
+		return false
+	}
+	switch event.ScopeType {
+	case models.ScopeTypeDeviceList, models.ScopeTypeDeviceSets:
+		return true
+	case models.ScopeTypeMixed:
+		_, handled, err := mixedSiteOnlyEventResourceContexts(event)
+		return !handled && err == nil
+	case models.ScopeTypeWholeOrg, models.ScopeTypeSite:
+		return false
+	default:
+		return false
+	}
 }
 
 func (h *Handler) listPermittedEvents(
@@ -772,20 +839,27 @@ func (h *Handler) eventSiteResourceContexts(
 	if contexts, handled, err := mixedSiteOnlyEventResourceContexts(event); handled || err != nil {
 		return contexts, err
 	}
-	siteIDs, complete, err := h.service.ListTargetSiteIDsByEvent(ctx, orgID, event.EventUUID)
-	if err != nil {
-		return nil, err
+	var coverage models.TargetSiteCoverage
+	if event.TargetSiteCoverage != nil {
+		coverage = *event.TargetSiteCoverage
+	} else {
+		var err error
+		coverage, err = h.service.ListTargetSiteCoverageByEvent(ctx, orgID, event.EventUUID)
+		if err != nil {
+			return nil, err
+		}
+		event.TargetSiteCoverage = &coverage
 	}
-	if !complete {
+	if !coverage.Complete {
 		return nil, fleeterror.NewForbiddenError(incompleteTargetSiteContextMessage)
 	}
-	if len(siteIDs) == 0 {
+	if len(coverage.SiteIDs) == 0 {
 		if contexts, handled, err := h.scopeJSONEventResourceContexts(ctx, orgID, event); handled || err != nil {
 			return contexts, err
 		}
 	}
-	contexts := make([]authz.ResourceContext, 0, len(siteIDs))
-	for _, siteID := range siteIDs {
+	contexts := make([]authz.ResourceContext, 0, len(coverage.SiteIDs))
+	for _, siteID := range coverage.SiteIDs {
 		contexts = append(contexts, authz.ResourceContext{SiteID: &siteID})
 	}
 	return contexts, nil

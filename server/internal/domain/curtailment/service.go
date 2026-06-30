@@ -997,14 +997,37 @@ func (s *Service) ListTargetsByEvent(ctx context.Context, orgID int64, eventUUID
 	return s.store.ListTargetsByEvent(ctx, orgID, eventUUID)
 }
 
-func (s *Service) ListTargetSiteIDsByEvent(ctx context.Context, orgID int64, eventUUID uuid.UUID) ([]int64, bool, error) {
+func (s *Service) ListTargetSiteCoverageByEvent(
+	ctx context.Context,
+	orgID int64,
+	eventUUID uuid.UUID,
+) (models.TargetSiteCoverage, error) {
 	if orgID <= 0 {
-		return nil, false, fleeterror.NewInvalidArgumentError("org_id must be set")
+		return models.TargetSiteCoverage{}, fleeterror.NewInvalidArgumentError("org_id must be set")
 	}
 	if eventUUID == uuid.Nil {
-		return nil, false, fleeterror.NewInvalidArgumentError("event_uuid must be set")
+		return models.TargetSiteCoverage{}, fleeterror.NewInvalidArgumentError("event_uuid must be set")
 	}
-	return s.store.ListTargetSiteIDsByEvent(ctx, orgID, eventUUID)
+	return s.store.ListTargetSiteCoverageByEvent(ctx, orgID, eventUUID)
+}
+
+func (s *Service) ListTargetSiteCoverageByEvents(
+	ctx context.Context,
+	orgID int64,
+	eventUUIDs []uuid.UUID,
+) (map[uuid.UUID]models.TargetSiteCoverage, error) {
+	if orgID <= 0 {
+		return nil, fleeterror.NewInvalidArgumentError("org_id must be set")
+	}
+	if len(eventUUIDs) == 0 {
+		return map[uuid.UUID]models.TargetSiteCoverage{}, nil
+	}
+	for _, eventUUID := range eventUUIDs {
+		if eventUUID == uuid.Nil {
+			return nil, fleeterror.NewInvalidArgumentError("event_uuid must be set")
+		}
+	}
+	return s.store.ListTargetSiteCoverageByEvents(ctx, orgID, eventUUIDs)
 }
 
 // runSelector runs the org-config → scope → candidate → classify →

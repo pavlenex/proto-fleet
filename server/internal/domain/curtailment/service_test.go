@@ -256,8 +256,26 @@ func (f *fakeStore) ListTargetsByEventPage(ctx context.Context, params interface
 	return targets, "", err
 }
 
-func (f *fakeStore) ListTargetSiteIDsByEvent(_ context.Context, _ int64, eventUUID uuid.UUID) ([]int64, bool, error) {
-	return append([]int64(nil), f.targetSiteIDsByEventUUID[eventUUID]...), true, nil
+func (f *fakeStore) ListTargetSiteCoverageByEvent(_ context.Context, _ int64, eventUUID uuid.UUID) (models.TargetSiteCoverage, error) {
+	siteIDs := append([]int64(nil), f.targetSiteIDsByEventUUID[eventUUID]...)
+	return models.TargetSiteCoverage{
+		SiteIDs:           siteIDs,
+		Complete:          true,
+		TargetCount:       int64(len(siteIDs)),
+		MappedTargetCount: int64(len(siteIDs)),
+	}, nil
+}
+
+func (f *fakeStore) ListTargetSiteCoverageByEvents(_ context.Context, _ int64, eventUUIDs []uuid.UUID) (map[uuid.UUID]models.TargetSiteCoverage, error) {
+	coverageByEvent := make(map[uuid.UUID]models.TargetSiteCoverage, len(eventUUIDs))
+	for _, eventUUID := range eventUUIDs {
+		coverage, err := f.ListTargetSiteCoverageByEvent(context.Background(), 0, eventUUID)
+		if err != nil {
+			return nil, err
+		}
+		coverageByEvent[eventUUID] = coverage
+	}
+	return coverageByEvent, nil
 }
 
 func (f *fakeStore) GetTargetRollupByEvent(_ context.Context, _ int64, eventUUID uuid.UUID) (*models.TargetRollup, error) {
