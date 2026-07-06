@@ -13,6 +13,7 @@ import type {
 import {
   getActiveCurtailmentDisplayState,
   getCurtailmentEventEstimatedReductionKw,
+  getCurtailmentEventLiveTargetCount,
   getCurtailmentEventObservedReductionKw,
   getCurtailmentEventScopeLabel,
   getCurtailmentEventSelectedMinerCount,
@@ -273,6 +274,18 @@ export function hasCurtailmentTargetMetrics(event: ProtoCurtailmentEvent): boole
   );
 }
 
+// A live rollup proves target counts but not estimated kW: active-list rows
+// carry rollups while their decision snapshot stays scrubbed, so kW estimates
+// need a snapshot number or hydrated target baselines. Target rows alone are
+// not enough — baseline_power_w is optional (telemetry gaps at selection), so
+// baseline-less targets would sum to a fabricated 0.0 kW estimate.
+export function hasCurtailmentEstimatedReductionKw(event: ProtoCurtailmentEvent): boolean {
+  return (
+    hasSnapshotNumber(event, estimatedReductionKwSnapshotKeys) ||
+    event.targets.some((target) => target.baselinePowerW !== undefined)
+  );
+}
+
 function getObservedPowerSummary(event: ProtoCurtailmentEvent, estimatedReductionKw: number): ObservedPowerSummary {
   let observedPowerTotalW = 0;
   let hasObservedPower = false;
@@ -306,12 +319,17 @@ export function mapActiveCurtailmentEvent(
     isAutomationOwned: isAutomationExternalSource(externalSource),
     targetSiteCoverage: mapTargetSiteCoverage(event),
     endedAt: timestampToIsoString(event.endedAt),
-    selectedMiners: getCurtailmentEventSelectedMinerCount(event),
+    selectedMiners: getCurtailmentEventLiveTargetCount(event),
     estimatedReductionKw,
     targetKw: getFixedKwTarget(event),
     observedReductionKw: observedPowerSummary.observedReductionKw,
     remainingPowerKw: observedPowerSummary.remainingPowerKw,
-    restoreBatchSize: event.effectiveBatchSize || event.restoreBatchSize,
+    // Restore displays follow the configured restore_batch_size, which is
+    // what the reconciler's restore claims obey (0 = up to the safety limit
+    // per wave). effective_batch_size is a start-time stamp of the selected
+    // count; all-paired and closed-loop growth leaves it stale, so it must
+    // not masquerade as the restore wave size.
+    restoreBatchSize: event.restoreBatchSize,
     restoreBatchIntervalSec: event.restoreBatchIntervalSec,
     rollups: getCurtailmentTargetRollups(event),
   };
@@ -332,6 +350,7 @@ export function mapCurtailmentHistoryEvent(
     selectedMiners: getCurtailmentEventSelectedMinerCount(event),
     estimatedReductionKw: getCurtailmentEventEstimatedReductionKw(event),
     targetMetricsAvailable: hasCurtailmentTargetMetrics(event),
+    estimatedReductionAvailable: hasCurtailmentEstimatedReductionKw(event),
     targetKw: getFixedKwTarget(event),
     sourceLabel: getSourceLabel(externalSource),
     startedAt: timestampToIsoString(event.startedAt),
@@ -351,9 +370,13 @@ export function mapActiveCurtailmentHistoryEvent(
     return historyEvent;
   }
 
+  // Injected active rows represent live events, so they share the active
+  // card's live target count instead of the snapshot count.
+  const activeEvent = mapActiveCurtailmentEvent(event, options);
   return {
     ...historyEvent,
-    displayState: getActiveCurtailmentDisplayState(mapActiveCurtailmentEvent(event, options), {
+    selectedMiners: activeEvent.selectedMiners,
+    displayState: getActiveCurtailmentDisplayState(activeEvent, {
       dispatchStartedAsCurtailing: true,
     }),
   };

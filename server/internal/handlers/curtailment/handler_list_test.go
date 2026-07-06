@@ -322,8 +322,9 @@ func TestHandler_ListCurtailmentEvents_HappyPath(t *testing.T) {
 }
 
 // TestHandler_ListActiveCurtailments_ReturnsActiveEvents: multiple concurrent
-// non-terminal events round-trip through the handler, and the per-target heavy
-// payload is intentionally absent (use GetCurtailmentEvent for detail).
+// non-terminal events round-trip through the handler with their live target
+// rollups, and the per-target heavy payload and decision snapshot are
+// intentionally absent (use GetCurtailmentEvent for detail).
 func TestHandler_ListActiveCurtailments_ReturnsActiveEvents(t *testing.T) {
 	t.Parallel()
 	source, reference, key := "opensearch", "alert-1", "retry-key"
@@ -344,6 +345,18 @@ func TestHandler_ListActiveCurtailments_ReturnsActiveEvents(t *testing.T) {
 				ExternalSource:          &source,
 				ExternalReference:       &reference,
 				IdempotencyKey:          &key,
+				DecisionSnapshotJSON:    []byte(`{"selected_count":10}`),
+				TargetRollup: &models.TargetRollup{
+					Pending:       1,
+					Dispatched:    2,
+					Confirmed:     4990,
+					Drifted:       1,
+					Resolved:      2,
+					Released:      1,
+					RestoreFailed: 1,
+					Unavailable:   2,
+					Total:         5000,
+				},
 			},
 			{
 				ID:                      2,
@@ -357,6 +370,7 @@ func TestHandler_ListActiveCurtailments_ReturnsActiveEvents(t *testing.T) {
 				RestoreBatchSize:        10,
 				RestoreBatchIntervalSec: 120,
 				Reason:                  "site-b",
+				TargetRollup:            &models.TargetRollup{},
 			},
 		},
 	}
@@ -368,10 +382,107 @@ func TestHandler_ListActiveCurtailments_ReturnsActiveEvents(t *testing.T) {
 	assert.Equal(t, store.activeEvents[0].EventUUID.String(), resp.Msg.Events[0].EventUuid)
 	assert.Equal(t, store.activeEvents[1].EventUUID.String(), resp.Msg.Events[1].EventUuid)
 	assert.Empty(t, resp.Msg.Events[0].Targets, "list-active response must not include per-target rows")
+	assert.Nil(t, resp.Msg.Events[0].DecisionSnapshot, "list-active response must not include the decision snapshot")
+	// Live rollups ride along so active displays can show the event's current
+	// target set instead of the event-start snapshot count.
+	require.NotNil(t, resp.Msg.Events[0].TargetRollup)
+	assert.Equal(t, int32(5000), resp.Msg.Events[0].TargetRollup.Total)
+	assert.Equal(t, int32(4990), resp.Msg.Events[0].TargetRollup.Confirmed)
+	assert.Equal(t, int32(2), resp.Msg.Events[0].TargetRollup.Unavailable)
+	assert.Equal(t, int32(1), resp.Msg.Events[0].TargetRollup.RestoreFailed)
+	require.NotNil(t, resp.Msg.Events[1].TargetRollup, "target-less events carry a zeroed rollup")
+	assert.Equal(t, int32(0), resp.Msg.Events[1].TargetRollup.Total)
 	// Replay handles are scrubbed from the list view, like the history list.
 	assert.Empty(t, resp.Msg.Events[0].ExternalSource)
 	assert.Empty(t, resp.Msg.Events[0].ExternalReference)
 	assert.Empty(t, resp.Msg.Events[0].IdempotencyKey)
+}
+
+// TestHandler_ListActiveCurtailments_OmitsWholeOrgRollupForNarrowedRead: a
+// whole-org event stays visible on the plain org grant, but its live rollup
+// aggregates target counts across every site — including sites the caller's
+// read grant is narrowed away from — so the rollup requires unnarrowed
+// org-wide read. Site-scoped events at permitted sites keep their rollups.
+func TestHandler_ListActiveCurtailments_OmitsWholeOrgRollupForNarrowedRead(t *testing.T) {
+	t.Parallel()
+	const (
+		orgID       = int64(42)
+		allowedSite = int64(7)
+		narrowSite  = int64(8)
+	)
+	wholeOrgUUID := uuid.New()
+	allowedSiteUUID := uuid.New()
+	store := &listStubStore{
+		activeEvents: []*models.Event{
+			{
+				ID:                      1,
+				EventUUID:               wholeOrgUUID,
+				OrgID:                   orgID,
+				State:                   models.EventStateActive,
+				Mode:                    models.ModeFullFleet,
+				Strategy:                models.StrategyLeastEfficientFirst,
+				Level:                   models.LevelFull,
+				Priority:                models.PriorityNormal,
+				RestoreBatchSize:        10,
+				RestoreBatchIntervalSec: 120,
+				Reason:                  "whole-org",
+				ScopeType:               models.ScopeTypeWholeOrg,
+				TargetRollup:            &models.TargetRollup{Confirmed: 4990, Pending: 10, Total: 5000},
+			},
+			{
+				ID:                      2,
+				EventUUID:               allowedSiteUUID,
+				OrgID:                   orgID,
+				State:                   models.EventStateActive,
+				Mode:                    models.ModeFixedKw,
+				Strategy:                models.StrategyLeastEfficientFirst,
+				Level:                   models.LevelFull,
+				Priority:                models.PriorityNormal,
+				RestoreBatchSize:        10,
+				RestoreBatchIntervalSec: 120,
+				Reason:                  "allowed-site",
+				ScopeType:               models.ScopeTypeSite,
+				ScopeJSON:               siteScopeJSON(t, allowedSite),
+				TargetRollup:            &models.TargetRollup{Confirmed: 3, Total: 3},
+			},
+		},
+	}
+	h := NewHandler(domainCurtailment.NewService(store))
+	narrowedCtx := testSessionCtxWithAssignments(t, &session.Info{
+		AuthMethod:     session.AuthMethodSession,
+		OrganizationID: orgID,
+		UserID:         9,
+		Role:           "OPERATOR",
+	}, testOrgAssignment(authz.PermCurtailmentRead),
+		testSiteAssignment(allowedSite, authz.PermCurtailmentRead),
+		testSiteAssignment(narrowSite))
+
+	resp, err := h.ListActiveCurtailments(narrowedCtx, connect.NewRequest(&pb.ListActiveCurtailmentsRequest{}))
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.Events, 2)
+	assert.Equal(t, wholeOrgUUID.String(), resp.Msg.Events[0].EventUuid,
+		"whole-org events stay visible so narrowed operators learn their sites are curtailed")
+	assert.Nil(t, resp.Msg.Events[0].TargetRollup,
+		"whole-org rollup aggregates narrowed sites; it must not ship without org-wide read")
+	require.NotNil(t, resp.Msg.Events[1].TargetRollup,
+		"site-scoped rollups at permitted sites are unaffected by narrowing elsewhere")
+	assert.Equal(t, int32(3), resp.Msg.Events[1].TargetRollup.Total)
+
+	orgWideCtx := testSessionCtxWithAssignments(t, &session.Info{
+		AuthMethod:     session.AuthMethodSession,
+		OrganizationID: orgID,
+		UserID:         9,
+		Role:           "OPERATOR",
+	}, testOrgAssignment(authz.PermCurtailmentRead),
+		testSiteAssignment(allowedSite, authz.PermCurtailmentRead),
+		testSiteAssignment(narrowSite, authz.PermCurtailmentRead))
+
+	resp, err = h.ListActiveCurtailments(orgWideCtx, connect.NewRequest(&pb.ListActiveCurtailmentsRequest{}))
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.Events, 2)
+	require.NotNil(t, resp.Msg.Events[0].TargetRollup,
+		"matching narrowed grants keep org read effective everywhere, so the rollup ships")
+	assert.Equal(t, int32(5000), resp.Msg.Events[0].TargetRollup.Total)
 }
 
 func TestHandler_ListActiveCurtailments_FiltersSiteScopedEvents(t *testing.T) {
