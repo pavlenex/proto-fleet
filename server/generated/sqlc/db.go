@@ -36,6 +36,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.adminTerminateCurtailmentEventStmt, err = db.PrepareContext(ctx, adminTerminateCurtailmentEvent); err != nil {
 		return nil, fmt.Errorf("error preparing query AdminTerminateCurtailmentEvent: %w", err)
 	}
+	if q.advanceFleetMetricRollupProgressStmt, err = db.PrepareContext(ctx, advanceFleetMetricRollupProgress); err != nil {
+		return nil, fmt.Errorf("error preparing query AdvanceFleetMetricRollupProgress: %w", err)
+	}
 	if q.allDevicesBelongToOrgStmt, err = db.PrepareContext(ctx, allDevicesBelongToOrg); err != nil {
 		return nil, fmt.Errorf("error preparing query AllDevicesBelongToOrg: %w", err)
 	}
@@ -266,6 +269,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.deleteExpiredSessionsStmt, err = db.PrepareContext(ctx, deleteExpiredSessions); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteExpiredSessions: %w", err)
+	}
+	if q.deleteFleetMetricRollupsForWindowStmt, err = db.PrepareContext(ctx, deleteFleetMetricRollupsForWindow); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteFleetMetricRollupsForWindow: %w", err)
 	}
 	if q.deleteFleetNodeDevicePairingsStmt, err = db.PrepareContext(ctx, deleteFleetNodeDevicePairings); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteFleetNodeDevicePairings: %w", err)
@@ -564,6 +570,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getFilteredDeviceIdsStmt, err = db.PrepareContext(ctx, getFilteredDeviceIds); err != nil {
 		return nil, fmt.Errorf("error preparing query GetFilteredDeviceIds: %w", err)
 	}
+	if q.getFleetMetricRollupCoverageStmt, err = db.PrepareContext(ctx, getFleetMetricRollupCoverage); err != nil {
+		return nil, fmt.Errorf("error preparing query GetFleetMetricRollupCoverage: %w", err)
+	}
 	if q.getFleetNodeByIDStmt, err = db.PrepareContext(ctx, getFleetNodeByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetFleetNodeByID: %w", err)
 	}
@@ -590,6 +599,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getLatestDeviceMetricsStmt, err = db.PrepareContext(ctx, getLatestDeviceMetrics); err != nil {
 		return nil, fmt.Errorf("error preparing query GetLatestDeviceMetrics: %w", err)
+	}
+	if q.getLatestFleetMetricRollupBucketStmt, err = db.PrepareContext(ctx, getLatestFleetMetricRollupBucket); err != nil {
+		return nil, fmt.Errorf("error preparing query GetLatestFleetMetricRollupBucket: %w", err)
 	}
 	if q.getMQTTSourceConfigByOrgStmt, err = db.PrepareContext(ctx, getMQTTSourceConfigByOrg); err != nil {
 		return nil, fmt.Errorf("error preparing query GetMQTTSourceConfigByOrg: %w", err)
@@ -629,6 +641,18 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getOpenErrorByDedupKeyStmt, err = db.PrepareContext(ctx, getOpenErrorByDedupKey); err != nil {
 		return nil, fmt.Errorf("error preparing query GetOpenErrorByDedupKey: %w", err)
+	}
+	if q.getOrgDeviceMetricsHourlyAggregatesStmt, err = db.PrepareContext(ctx, getOrgDeviceMetricsHourlyAggregates); err != nil {
+		return nil, fmt.Errorf("error preparing query GetOrgDeviceMetricsHourlyAggregates: %w", err)
+	}
+	if q.getOrgDeviceMetricsRawBucketAggregatesStmt, err = db.PrepareContext(ctx, getOrgDeviceMetricsRawBucketAggregates); err != nil {
+		return nil, fmt.Errorf("error preparing query GetOrgDeviceMetricsRawBucketAggregates: %w", err)
+	}
+	if q.getOrgDeviceStatusHourlyAggregatesStmt, err = db.PrepareContext(ctx, getOrgDeviceStatusHourlyAggregates); err != nil {
+		return nil, fmt.Errorf("error preparing query GetOrgDeviceStatusHourlyAggregates: %w", err)
+	}
+	if q.getOrgFleetMetricRollupsStmt, err = db.PrepareContext(ctx, getOrgFleetMetricRollups); err != nil {
+		return nil, fmt.Errorf("error preparing query GetOrgFleetMetricRollups: %w", err)
 	}
 	if q.getOrgScopeAssignmentForUserStmt, err = db.PrepareContext(ctx, getOrgScopeAssignmentForUser); err != nil {
 		return nil, fmt.Errorf("error preparing query GetOrgScopeAssignmentForUser: %w", err)
@@ -1404,6 +1428,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.upsertDiscoveredDeviceFromFleetNodeStmt, err = db.PrepareContext(ctx, upsertDiscoveredDeviceFromFleetNode); err != nil {
 		return nil, fmt.Errorf("error preparing query UpsertDiscoveredDeviceFromFleetNode: %w", err)
 	}
+	if q.upsertFleetMetricRollupsStmt, err = db.PrepareContext(ctx, upsertFleetMetricRollups); err != nil {
+		return nil, fmt.Errorf("error preparing query UpsertFleetMetricRollups: %w", err)
+	}
 	if q.upsertFleetNodeAuthChallengeStmt, err = db.PrepareContext(ctx, upsertFleetNodeAuthChallenge); err != nil {
 		return nil, fmt.Errorf("error preparing query UpsertFleetNodeAuthChallenge: %w", err)
 	}
@@ -1442,6 +1469,11 @@ func (q *Queries) Close() error {
 	if q.adminTerminateCurtailmentEventStmt != nil {
 		if cerr := q.adminTerminateCurtailmentEventStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing adminTerminateCurtailmentEventStmt: %w", cerr)
+		}
+	}
+	if q.advanceFleetMetricRollupProgressStmt != nil {
+		if cerr := q.advanceFleetMetricRollupProgressStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing advanceFleetMetricRollupProgressStmt: %w", cerr)
 		}
 	}
 	if q.allDevicesBelongToOrgStmt != nil {
@@ -1827,6 +1859,11 @@ func (q *Queries) Close() error {
 	if q.deleteExpiredSessionsStmt != nil {
 		if cerr := q.deleteExpiredSessionsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteExpiredSessionsStmt: %w", cerr)
+		}
+	}
+	if q.deleteFleetMetricRollupsForWindowStmt != nil {
+		if cerr := q.deleteFleetMetricRollupsForWindowStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteFleetMetricRollupsForWindowStmt: %w", cerr)
 		}
 	}
 	if q.deleteFleetNodeDevicePairingsStmt != nil {
@@ -2324,6 +2361,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getFilteredDeviceIdsStmt: %w", cerr)
 		}
 	}
+	if q.getFleetMetricRollupCoverageStmt != nil {
+		if cerr := q.getFleetMetricRollupCoverageStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getFleetMetricRollupCoverageStmt: %w", cerr)
+		}
+	}
 	if q.getFleetNodeByIDStmt != nil {
 		if cerr := q.getFleetNodeByIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getFleetNodeByIDStmt: %w", cerr)
@@ -2367,6 +2409,11 @@ func (q *Queries) Close() error {
 	if q.getLatestDeviceMetricsStmt != nil {
 		if cerr := q.getLatestDeviceMetricsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getLatestDeviceMetricsStmt: %w", cerr)
+		}
+	}
+	if q.getLatestFleetMetricRollupBucketStmt != nil {
+		if cerr := q.getLatestFleetMetricRollupBucketStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getLatestFleetMetricRollupBucketStmt: %w", cerr)
 		}
 	}
 	if q.getMQTTSourceConfigByOrgStmt != nil {
@@ -2432,6 +2479,26 @@ func (q *Queries) Close() error {
 	if q.getOpenErrorByDedupKeyStmt != nil {
 		if cerr := q.getOpenErrorByDedupKeyStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getOpenErrorByDedupKeyStmt: %w", cerr)
+		}
+	}
+	if q.getOrgDeviceMetricsHourlyAggregatesStmt != nil {
+		if cerr := q.getOrgDeviceMetricsHourlyAggregatesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getOrgDeviceMetricsHourlyAggregatesStmt: %w", cerr)
+		}
+	}
+	if q.getOrgDeviceMetricsRawBucketAggregatesStmt != nil {
+		if cerr := q.getOrgDeviceMetricsRawBucketAggregatesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getOrgDeviceMetricsRawBucketAggregatesStmt: %w", cerr)
+		}
+	}
+	if q.getOrgDeviceStatusHourlyAggregatesStmt != nil {
+		if cerr := q.getOrgDeviceStatusHourlyAggregatesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getOrgDeviceStatusHourlyAggregatesStmt: %w", cerr)
+		}
+	}
+	if q.getOrgFleetMetricRollupsStmt != nil {
+		if cerr := q.getOrgFleetMetricRollupsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getOrgFleetMetricRollupsStmt: %w", cerr)
 		}
 	}
 	if q.getOrgScopeAssignmentForUserStmt != nil {
@@ -3724,6 +3791,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing upsertDiscoveredDeviceFromFleetNodeStmt: %w", cerr)
 		}
 	}
+	if q.upsertFleetMetricRollupsStmt != nil {
+		if cerr := q.upsertFleetMetricRollupsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing upsertFleetMetricRollupsStmt: %w", cerr)
+		}
+	}
 	if q.upsertFleetNodeAuthChallengeStmt != nil {
 		if cerr := q.upsertFleetNodeAuthChallengeStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing upsertFleetNodeAuthChallengeStmt: %w", cerr)
@@ -3792,6 +3864,7 @@ type Queries struct {
 	addDevicesToDeviceSetStmt                                  *sql.Stmt
 	adminResetUserPasswordStmt                                 *sql.Stmt
 	adminTerminateCurtailmentEventStmt                         *sql.Stmt
+	advanceFleetMetricRollupProgressStmt                       *sql.Stmt
 	allDevicesBelongToOrgStmt                                  *sql.Stmt
 	assignBuildingToSiteStmt                                   *sql.Stmt
 	assignBuildingsToSiteBulkStmt                              *sql.Stmt
@@ -3869,6 +3942,7 @@ type Queries struct {
 	deleteCurtailmentResponseProfilesBySiteStmt                *sql.Stmt
 	deleteDisabledMQTTSourceConfigByOrgStmt                    *sql.Stmt
 	deleteExpiredSessionsStmt                                  *sql.Stmt
+	deleteFleetMetricRollupsForWindowStmt                      *sql.Stmt
 	deleteFleetNodeDevicePairingsStmt                          *sql.Stmt
 	deleteMinerCredentialsByDeviceIDAndOrgIDStmt               *sql.Stmt
 	deleteMinerCredentialsForDeviceIdentifiersStmt             *sql.Stmt
@@ -3968,6 +4042,7 @@ type Queries struct {
 	getErrorByIDStmt                                           *sql.Stmt
 	getFilteredDeviceIdentifiersStmt                           *sql.Stmt
 	getFilteredDeviceIdsStmt                                   *sql.Stmt
+	getFleetMetricRollupCoverageStmt                           *sql.Stmt
 	getFleetNodeByIDStmt                                       *sql.Stmt
 	getFleetNodeByIDUnscopedStmt                               *sql.Stmt
 	getFleetNodePairedDeviceIdentifierStmt                     *sql.Stmt
@@ -3977,6 +4052,7 @@ type Queries struct {
 	getKnownSubnetsStmt                                        *sql.Stmt
 	getLatestAllDeviceMetricsStmt                              *sql.Stmt
 	getLatestDeviceMetricsStmt                                 *sql.Stmt
+	getLatestFleetMetricRollupBucketStmt                       *sql.Stmt
 	getMQTTSourceConfigByOrgStmt                               *sql.Stmt
 	getMQTTSourceStateByIDStmt                                 *sql.Stmt
 	getMaxPriorityStmt                                         *sql.Stmt
@@ -3990,6 +4066,10 @@ type Queries struct {
 	getMinerStateSnapshotsStmt                                 *sql.Stmt
 	getOfflineDevicesStmt                                      *sql.Stmt
 	getOpenErrorByDedupKeyStmt                                 *sql.Stmt
+	getOrgDeviceMetricsHourlyAggregatesStmt                    *sql.Stmt
+	getOrgDeviceMetricsRawBucketAggregatesStmt                 *sql.Stmt
+	getOrgDeviceStatusHourlyAggregatesStmt                     *sql.Stmt
+	getOrgFleetMetricRollupsStmt                               *sql.Stmt
 	getOrgScopeAssignmentForUserStmt                           *sql.Stmt
 	getOrganizationByIDStmt                                    *sql.Stmt
 	getOrganizationByNameStmt                                  *sql.Stmt
@@ -4248,6 +4328,7 @@ type Queries struct {
 	upsertDeviceStatusStmt                                     *sql.Stmt
 	upsertDiscoveredDeviceStmt                                 *sql.Stmt
 	upsertDiscoveredDeviceFromFleetNodeStmt                    *sql.Stmt
+	upsertFleetMetricRollupsStmt                               *sql.Stmt
 	upsertFleetNodeAuthChallengeStmt                           *sql.Stmt
 	upsertFleetNodeSessionStmt                                 *sql.Stmt
 	upsertMQTTSourceStateStmt                                  *sql.Stmt
@@ -4263,6 +4344,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		addDevicesToDeviceSetStmt:                                  q.addDevicesToDeviceSetStmt,
 		adminResetUserPasswordStmt:                                 q.adminResetUserPasswordStmt,
 		adminTerminateCurtailmentEventStmt:                         q.adminTerminateCurtailmentEventStmt,
+		advanceFleetMetricRollupProgressStmt:                       q.advanceFleetMetricRollupProgressStmt,
 		allDevicesBelongToOrgStmt:                                  q.allDevicesBelongToOrgStmt,
 		assignBuildingToSiteStmt:                                   q.assignBuildingToSiteStmt,
 		assignBuildingsToSiteBulkStmt:                              q.assignBuildingsToSiteBulkStmt,
@@ -4340,6 +4422,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteCurtailmentResponseProfilesBySiteStmt:                q.deleteCurtailmentResponseProfilesBySiteStmt,
 		deleteDisabledMQTTSourceConfigByOrgStmt:                    q.deleteDisabledMQTTSourceConfigByOrgStmt,
 		deleteExpiredSessionsStmt:                                  q.deleteExpiredSessionsStmt,
+		deleteFleetMetricRollupsForWindowStmt:                      q.deleteFleetMetricRollupsForWindowStmt,
 		deleteFleetNodeDevicePairingsStmt:                          q.deleteFleetNodeDevicePairingsStmt,
 		deleteMinerCredentialsByDeviceIDAndOrgIDStmt:               q.deleteMinerCredentialsByDeviceIDAndOrgIDStmt,
 		deleteMinerCredentialsForDeviceIdentifiersStmt:             q.deleteMinerCredentialsForDeviceIdentifiersStmt,
@@ -4439,6 +4522,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getErrorByIDStmt:                                           q.getErrorByIDStmt,
 		getFilteredDeviceIdentifiersStmt:                           q.getFilteredDeviceIdentifiersStmt,
 		getFilteredDeviceIdsStmt:                                   q.getFilteredDeviceIdsStmt,
+		getFleetMetricRollupCoverageStmt:                           q.getFleetMetricRollupCoverageStmt,
 		getFleetNodeByIDStmt:                                       q.getFleetNodeByIDStmt,
 		getFleetNodeByIDUnscopedStmt:                               q.getFleetNodeByIDUnscopedStmt,
 		getFleetNodePairedDeviceIdentifierStmt:                     q.getFleetNodePairedDeviceIdentifierStmt,
@@ -4448,6 +4532,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getKnownSubnetsStmt:                                        q.getKnownSubnetsStmt,
 		getLatestAllDeviceMetricsStmt:                              q.getLatestAllDeviceMetricsStmt,
 		getLatestDeviceMetricsStmt:                                 q.getLatestDeviceMetricsStmt,
+		getLatestFleetMetricRollupBucketStmt:                       q.getLatestFleetMetricRollupBucketStmt,
 		getMQTTSourceConfigByOrgStmt:                               q.getMQTTSourceConfigByOrgStmt,
 		getMQTTSourceStateByIDStmt:                                 q.getMQTTSourceStateByIDStmt,
 		getMaxPriorityStmt:                                         q.getMaxPriorityStmt,
@@ -4461,6 +4546,10 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getMinerStateSnapshotsStmt:                                 q.getMinerStateSnapshotsStmt,
 		getOfflineDevicesStmt:                                      q.getOfflineDevicesStmt,
 		getOpenErrorByDedupKeyStmt:                                 q.getOpenErrorByDedupKeyStmt,
+		getOrgDeviceMetricsHourlyAggregatesStmt:                    q.getOrgDeviceMetricsHourlyAggregatesStmt,
+		getOrgDeviceMetricsRawBucketAggregatesStmt:                 q.getOrgDeviceMetricsRawBucketAggregatesStmt,
+		getOrgDeviceStatusHourlyAggregatesStmt:                     q.getOrgDeviceStatusHourlyAggregatesStmt,
+		getOrgFleetMetricRollupsStmt:                               q.getOrgFleetMetricRollupsStmt,
 		getOrgScopeAssignmentForUserStmt:                           q.getOrgScopeAssignmentForUserStmt,
 		getOrganizationByIDStmt:                                    q.getOrganizationByIDStmt,
 		getOrganizationByNameStmt:                                  q.getOrganizationByNameStmt,
@@ -4719,6 +4808,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		upsertDeviceStatusStmt:                                     q.upsertDeviceStatusStmt,
 		upsertDiscoveredDeviceStmt:                                 q.upsertDiscoveredDeviceStmt,
 		upsertDiscoveredDeviceFromFleetNodeStmt:                    q.upsertDiscoveredDeviceFromFleetNodeStmt,
+		upsertFleetMetricRollupsStmt:                               q.upsertFleetMetricRollupsStmt,
 		upsertFleetNodeAuthChallengeStmt:                           q.upsertFleetNodeAuthChallengeStmt,
 		upsertFleetNodeSessionStmt:                                 q.upsertFleetNodeSessionStmt,
 		upsertMQTTSourceStateStmt:                                  q.upsertMQTTSourceStateStmt,

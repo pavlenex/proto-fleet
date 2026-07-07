@@ -135,6 +135,10 @@ const (
 	defaultMetricsFlushInterval = 1 * time.Second
 
 	defaultStateSnapshotInterval = 60 * time.Second
+	fleetRollupInterval          = 30 * time.Second
+	fleetRollupMaxBucketsPerTick = 40
+	fleetRollupBackfillFloor     = 6 * time.Hour
+	fleetRollupRewriteBuckets    = models.FleetMetricRollupRawTailBuckets
 
 	// Context timeouts
 	shutdownFlushTimeout = 5 * time.Second
@@ -186,6 +190,8 @@ type TelemetryDataStore interface {
 	StreamTelemetryUpdates(ctx context.Context, query models.StreamQuery) (<-chan models.TelemetryUpdate, error)
 	GetCombinedMetrics(ctx context.Context, query models.CombinedMetricsQuery) (models.CombinedMetric, error)
 	InsertMinerStateSnapshot(ctx context.Context, at time.Time) error
+	UpsertFleetMetricRollups(ctx context.Context, startTime, endTime time.Time) error
+	GetLatestFleetMetricRollupBucket(ctx context.Context) (time.Time, error)
 	Ping(ctx context.Context) error
 }
 
@@ -536,6 +542,7 @@ func (s *TelemetryService) Start(ctx context.Context) error {
 	go s.devicePollingRoutine(ctx)
 	go s.statusPollingRoutine(ctx)
 	go s.fleetStateSnapshotRoutine(ctx)
+	go s.fleetMetricRollupRoutine(ctx)
 	return nil
 }
 
@@ -751,6 +758,63 @@ func (s *TelemetryService) writeFleetStateSnapshot(ctx context.Context, at time.
 	if err := s.telemetryDataStore.InsertMinerStateSnapshot(ctx, at); err != nil {
 		slog.Warn("snapshot routine: insert failed", "error", err)
 	}
+}
+
+func (s *TelemetryService) fleetMetricRollupRoutine(ctx context.Context) {
+	ticker := time.NewTicker(fleetRollupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case tickTime := <-ticker.C:
+			s.writeFleetMetricRollups(ctx, tickTime)
+		}
+	}
+}
+
+func (s *TelemetryService) writeFleetMetricRollups(ctx context.Context, at time.Time) {
+	latest, err := s.telemetryDataStore.GetLatestFleetMetricRollupBucket(ctx)
+	if err != nil {
+		slog.Warn("fleet metric rollup routine: latest bucket lookup failed", "error", err)
+		return
+	}
+	startTime, endTime, ok := fleetMetricRollupWriteWindow(at, latest)
+	if !ok {
+		return
+	}
+	if err := s.telemetryDataStore.UpsertFleetMetricRollups(ctx, startTime, endTime); err != nil {
+		slog.Warn("fleet metric rollup routine: upsert failed",
+			"start_time", startTime,
+			"end_time", endTime,
+			"error", err)
+	}
+}
+
+func fleetMetricRollupWriteWindow(now, latest time.Time) (startTime, endTime time.Time, ok bool) {
+	endTime = models.TruncateToFleetRollupBucket(now).Add(-time.Duration(models.FleetMetricRollupRawTailBuckets) * models.FleetMetricRollupBucketDuration)
+	startTime = latest.Add(models.FleetMetricRollupBucketDuration)
+	if !startTime.Before(endTime) {
+		return time.Time{}, time.Time{}, false
+	}
+	if !latest.Equal(time.Unix(0, 0).UTC()) {
+		startTime = startTime.Add(-time.Duration(fleetRollupRewriteBuckets) * models.FleetMetricRollupBucketDuration)
+	}
+
+	floor := endTime.Add(-fleetRollupBackfillFloor)
+	if startTime.Before(floor) {
+		startTime = floor
+	}
+	if !startTime.Before(endTime) {
+		return time.Time{}, time.Time{}, false
+	}
+
+	maxEnd := startTime.Add(time.Duration(fleetRollupMaxBucketsPerTick) * models.FleetMetricRollupBucketDuration)
+	if endTime.After(maxEnd) {
+		endTime = maxEnd
+	}
+	return startTime, endTime, true
 }
 
 // worker processes devices from task channels one at a time.
@@ -1626,6 +1690,7 @@ func (s *TelemetryService) fetchCombinedMetrics(ctx context.Context, query model
 	// aggregates have no site_id column, so we cannot filter them directly.
 	// This scopes line metrics, status counts, and the live uptime bar
 	// uniformly to the site's current devices.
+	hadExplicitDevices := len(query.DeviceIDs) > 0
 	if len(query.SiteIDs) > 0 || query.IncludeUnassigned {
 		identifiers, err := s.deviceStore.GetDeviceIdentifiersByOrgWithFilter(ctx, query.OrganizationID, &stores.MinerFilter{
 			SiteIDs:           query.SiteIDs,
@@ -1649,6 +1714,7 @@ func (s *TelemetryService) fetchCombinedMetrics(ctx context.Context, query model
 			return models.CombinedMetric{}, nil
 		}
 		query.DeviceIDs = scoped
+		query.DeviceListFromSiteScope = !hadExplicitDevices
 	}
 
 	// Returns raw values (H/s, W, J/H) - conversion to display units happens in the handler layer
@@ -1772,6 +1838,8 @@ func combinedMetricsFlightKey(query models.CombinedMetricsQuery) string {
 	writeSortedInts(&b, query.SiteIDs)
 	b.WriteByte('|')
 	b.WriteString(strconv.FormatBool(query.IncludeUnassigned))
+	b.WriteByte('|')
+	b.WriteString(strconv.FormatBool(query.DeviceListFromSiteScope))
 	return b.String()
 }
 
