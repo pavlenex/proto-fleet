@@ -1569,7 +1569,11 @@ func classifyCandidates(cands []*models.Candidate, opts classifyOpts) ([]Candida
 			skipped = append(skipped, SkippedDevice{c.DeviceIdentifier, SkipUnreachableResidualLoad})
 			summary.ExcludedOffline++
 			continue
-		case "INACTIVE", "NEEDS_MINING_POOL":
+		case "INACTIVE":
+			// Excluded by design: INACTIVE means the miner is sleeping
+			// (operator- or curtailment-initiated). Curtailing it is a no-op
+			// and restoring it would wake a miner someone deliberately put
+			// to sleep.
 			skipped = append(skipped, SkippedDevice{c.DeviceIdentifier, SkipNonActionableStatus})
 			summary.ExcludedNonActionable++
 			continue
@@ -1586,6 +1590,22 @@ func classifyCandidates(cands []*models.Candidate, opts classifyOpts) ([]Candida
 			// The all-paired policy holds these unavailable instead because it
 			// dispatches without the freshness gates below
 			// (AllPairedPolicyTargetState in selector.go).
+		case deviceStatusNeedsMiningPool:
+			// Commandability admission (#663): a pool-less miner is reachable,
+			// authenticated, and draws idle power — a sleep command lands.
+			// Subject to the freshness gates below, plus a positive-power
+			// requirement: power-vs-baseline is the only signal that can
+			// confirm curtail/restore for a never-hashing miner, so a
+			// zero-power sample is as good as stale. Its hash is forced to 0
+			// for selection (statusAuthoritativeHashRateHS): a pool-less
+			// miner cannot be mining, so a stale-positive hash sample must
+			// not let fixed-kW count it as curtailable mining load — the
+			// dual-signal filter excludes it there.
+			if !hasPositivePowerSample(c) {
+				skipped = append(skipped, SkippedDevice{c.DeviceIdentifier, SkipStaleTelemetry})
+				summary.ExcludedStale++
+				continue
+			}
 		}
 		if c.LatestMetricsAt == nil {
 			skipped = append(skipped, SkippedDevice{c.DeviceIdentifier, SkipStaleTelemetry})
@@ -1594,7 +1614,13 @@ func classifyCandidates(cands []*models.Candidate, opts classifyOpts) ([]Candida
 		}
 		// Missing, non-finite, or negative power/hash samples cannot prove the
 		// miner is observable after dispatch; treat them as stale telemetry.
-		if !hasNonNegativeFiniteFloat(c.LatestPowerW) || !hasNonNegativeFiniteFloat(c.LatestHashRateHS) {
+		// Pool-less miners are exempt from the hash-sample requirement: their
+		// hash is status-authoritatively 0 (a miner with no pool cannot be
+		// mining, and may never have reported a hash sample), and their
+		// positive-power requirement was already enforced above.
+		requiresHashSample := c.DeviceStatus != deviceStatusNeedsMiningPool
+		if !hasNonNegativeFiniteFloat(c.LatestPowerW) ||
+			(requiresHashSample && !hasNonNegativeFiniteFloat(c.LatestHashRateHS)) {
 			skipped = append(skipped, SkippedDevice{c.DeviceIdentifier, SkipStaleTelemetry})
 			summary.ExcludedStale++
 			continue
@@ -1612,7 +1638,7 @@ func classifyCandidates(cands []*models.Candidate, opts classifyOpts) ([]Candida
 		eligible = append(eligible, CandidateInput{
 			DeviceIdentifier: c.DeviceIdentifier,
 			PowerW:           derefFloat(c.LatestPowerW),
-			HashRateHS:       derefFloat(c.LatestHashRateHS),
+			HashRateHS:       statusAuthoritativeHashRateHS(c),
 			AvgEfficiencyJH:  avgEff,
 		})
 	}
@@ -1777,7 +1803,7 @@ func BuildInsertTargetParams(selected []SelectedDevice, mode models.Mode, minPow
 	targets := make([]models.InsertTargetParams, len(selected))
 	for i, sel := range selected {
 		var baseline *float64
-		if shouldPersistBaselinePowerW(mode, sel.PowerW, minPowerW) {
+		if shouldPersistBaselinePowerW(mode, sel.PowerW, minPowerW, sel.HashRateHS > 0) {
 			v := sel.PowerW
 			baseline = &v
 		}
@@ -1816,11 +1842,18 @@ func BuildFullFleetAdmissionTargets(
 	return BuildInsertTargetParams(plan.Selected, models.ModeFullFleet, minPowerW), plan.Skipped
 }
 
-func shouldPersistBaselinePowerW(mode models.Mode, powerW float64, minPowerW int32) bool {
+// shouldPersistBaselinePowerW gates baseline capture. Full-fleet selection
+// runs without the dual-signal filter, so a below-floor power reading from a
+// hashing miner is suspect (dead power monitor) and the hash-only
+// confirm/restore fallback is the better signal. For a non-hashing miner the
+// hash-only fallback is provably broken (hash is already 0: curtail confirms
+// instantly, restore never confirms), so any positive idle-draw baseline is
+// strictly better and the floor does not apply.
+func shouldPersistBaselinePowerW(mode models.Mode, powerW float64, minPowerW int32, hashing bool) bool {
 	if powerW <= 0 {
 		return false
 	}
-	if mode == models.ModeFullFleet && powerW < float64(minPowerW) {
+	if mode == models.ModeFullFleet && hashing && powerW < float64(minPowerW) {
 		return false
 	}
 	return true

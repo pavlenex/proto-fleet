@@ -1009,7 +1009,7 @@ func TestService_Preview_FiltersByPairingDeviceStatusAndStaleness(t *testing.T) 
 		miner("rebooting", "REBOOT_REQUIRED", "PAIRED", 3000, 100),
 		miner("offline", "OFFLINE", "PAIRED", 3000, 100),
 		miner("inactive", "INACTIVE", "PAIRED", 3000, 100),
-		miner("needs-pool", "NEEDS_MINING_POOL", "PAIRED", 3000, 100),
+		miner("needs-pool", "NEEDS_MINING_POOL", "PAIRED", 3000, 0),
 		miner("maintenance", "MAINTENANCE", "PAIRED", 3000, 100),
 		staleMiner("stale"),
 		minerWithEff("eligible", 3000, 100, 40),
@@ -1035,9 +1035,106 @@ func TestService_Preview_FiltersByPairingDeviceStatusAndStaleness(t *testing.T) 
 	assert.Equal(t, SkipRebootRequired, reasons["rebooting"])
 	assert.Equal(t, SkipUnreachableResidualLoad, reasons["offline"])
 	assert.Equal(t, SkipNonActionableStatus, reasons["inactive"])
-	assert.Equal(t, SkipNonActionableStatus, reasons["needs-pool"])
+	// Pool-less miner passes status admission (#663); in fixed-kW mode the
+	// dual-signal filter then skips it with the sharper diagnostic — idle
+	// draw with zero hash is phantom load for kW-sized selection.
+	assert.Equal(t, SkipPhantomLoadNoHash, reasons["needs-pool"])
 	assert.Equal(t, SkipMaintenance, reasons["maintenance"])
 	assert.Equal(t, SkipStaleTelemetry, reasons["stale"])
+}
+
+func TestClassifyCandidates_PoolLessMinerAdmittedWhenTelemetryFresh(t *testing.T) {
+	t.Parallel()
+
+	// Commandability admission (#663): NEEDS_MINING_POOL passes status
+	// admission even with zero hash, but stays behind the freshness gates
+	// plus a positive-power requirement (power is its only confirmable
+	// signal). A stale-positive hash sample is overridden by the status: the
+	// eligible candidate carries hash 0 so fixed-kW accounting and baseline
+	// persistence treat it as non-hashing.
+	fresh := miner("needs-pool-fresh", "NEEDS_MINING_POOL", "PAIRED", 2000, 0)
+	stalePositiveHash := miner("needs-pool-stale-hash", "NEEDS_MINING_POOL", "PAIRED", 2000, 100)
+	// Power-only telemetry: a pool-less miner may never have reported a hash
+	// sample at all; the hash-sample freshness requirement must not apply.
+	noHashSample := miner("needs-pool-no-hash-sample", "NEEDS_MINING_POOL", "PAIRED", 2000, 0)
+	noHashSample.LatestHashRateHS = nil
+	zeroPower := miner("needs-pool-zero-power", "NEEDS_MINING_POOL", "PAIRED", 0, 0)
+	stale := staleMiner("needs-pool-stale")
+	stale.DeviceStatus = "NEEDS_MINING_POOL"
+
+	eligible, skipped, _ := classifyCandidates(
+		[]*models.Candidate{fresh, stalePositiveHash, noHashSample, zeroPower, stale},
+		classifyOpts{CandidateMinPowerW: 1500},
+	)
+
+	require.Len(t, eligible, 3)
+	assert.Equal(t, "needs-pool-fresh", eligible[0].DeviceIdentifier)
+	assert.Equal(t, "needs-pool-stale-hash", eligible[1].DeviceIdentifier)
+	assert.Zero(t, eligible[1].HashRateHS,
+		"device status is authoritative: a pool-less miner cannot be mining, so a stale-positive hash sample must not count as mining load")
+	assert.Equal(t, "needs-pool-no-hash-sample", eligible[2].DeviceIdentifier)
+	assert.Zero(t, eligible[2].HashRateHS)
+
+	reasons := map[string]SkipReason{}
+	for _, s := range skipped {
+		reasons[s.DeviceIdentifier] = s.Reason
+	}
+	require.Len(t, skipped, 2)
+	assert.Equal(t, SkipStaleTelemetry, reasons["needs-pool-zero-power"],
+		"zero power is as good as stale for a miner whose only confirmable signal is power")
+	assert.Equal(t, SkipStaleTelemetry, reasons["needs-pool-stale"])
+}
+
+func TestService_Preview_PoolLessZeroHashMinerSkippedByDualSignalInFixedKw(t *testing.T) {
+	t.Parallel()
+
+	// A pool-less miner passes status admission (#663) but fixed-kW's
+	// dual-signal filter still excludes it: idle draw with zero hash is
+	// phantom load for kW-sized selection.
+	const orgID = int64(1)
+	store := newFakeStore()
+	store.orgConfigByOrg[orgID] = defaultOrgConfig(orgID)
+	store.candidatesByOrg[orgID] = []*models.Candidate{
+		miner("needs-pool", "NEEDS_MINING_POOL", "PAIRED", 3000, 0),
+		minerWithEff("eligible", 3000, 100, 40),
+	}
+
+	svc := NewService(store)
+	req := validRequest(orgID)
+	req.TargetKW = 2.5
+	plan, err := svc.Preview(t.Context(), req)
+	require.NoError(t, err)
+
+	require.Len(t, plan.Selected, 1)
+	assert.Equal(t, "eligible", plan.Selected[0].DeviceIdentifier)
+	reasons := map[string]SkipReason{}
+	for _, s := range plan.Skipped {
+		reasons[s.DeviceIdentifier] = s.Reason
+	}
+	assert.Equal(t, SkipPhantomLoadNoHash, reasons["needs-pool"])
+}
+
+func TestBuildInsertTargetParams_BaselineFloorAppliesOnlyToHashingMiners(t *testing.T) {
+	t.Parallel()
+
+	selected := []SelectedDevice{
+		// Hashing below the floor: suspect power reading (dead monitor);
+		// hash-only fallback works, so no baseline is persisted.
+		{DeviceIdentifier: "hashing-below-floor", PowerW: 400, HashRateHS: 100},
+		// Never-hashing below the floor: hash-only fallback is broken, so
+		// the idle-draw baseline must be persisted (#663).
+		{DeviceIdentifier: "idle-below-floor", PowerW: 400, HashRateHS: 0},
+		// Zero power never persists a baseline regardless of hash.
+		{DeviceIdentifier: "no-power", PowerW: 0, HashRateHS: 0},
+	}
+
+	targets := BuildInsertTargetParams(selected, models.ModeFullFleet, 1500)
+
+	require.Len(t, targets, 3)
+	assert.Nil(t, targets[0].BaselinePowerW)
+	require.NotNil(t, targets[1].BaselinePowerW)
+	assert.InDelta(t, 400.0, *targets[1].BaselinePowerW, 0.001)
+	assert.Nil(t, targets[2].BaselinePowerW)
 }
 
 func TestService_Preview_MaintenancePairAdmitsMiners(t *testing.T) {
