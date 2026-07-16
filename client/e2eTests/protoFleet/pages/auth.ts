@@ -44,6 +44,13 @@ export class AuthPage extends BasePage {
     await expect(this.page).toHaveURL(/.*\/auth/);
   }
 
+  async gotoAuthPage() {
+    const loginForm = this.page.locator(`//input[@id='username']`);
+    await this.page.goto("/auth");
+    await expect(this.page).toHaveURL(/.*\/auth/);
+    await expect(loginForm).toBeVisible();
+  }
+
   async inputNewPassword(password: string) {
     await this.page.locator(`//input[@id='newPassword']`).fill(password);
   }

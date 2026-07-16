@@ -2,6 +2,7 @@ import { expect, type Locator, Page } from "@playwright/test";
 import { DEFAULT_TIMEOUT, testConfig } from "../config/test.config";
 
 const FLEET_TAB_ROUTE = /.*\/fleet\/(?:sites|buildings|racks|miners)(?:[/?#].*)?$/;
+const OVERLAY_DISMISS_TIMEOUT = DEFAULT_TIMEOUT / 6;
 
 export class BasePage {
   constructor(
@@ -31,15 +32,23 @@ export class BasePage {
   }
 
   async clickClearAllFilters() {
-    await this.page.getByRole("button", { name: "Clear all filters", exact: true }).click();
+    await this.dismissVisibleToastIfPresent();
+    const clearAllFiltersButton = this.page.getByRole("button", { name: "Clear all filters", exact: true });
+    await clearAllFiltersButton.scrollIntoViewIfNeeded();
+    await clearAllFiltersButton.click();
   }
 
   async clearActiveFilter(filterValue: string) {
-    if (!this.isMobile) {
-      const clearButton = await this.visibleTestIdLocator(`active-filter-${filterValue}-clear`);
+    const clearButton = await this.findVisibleTestIdLocator(`active-filter-${filterValue}-clear`);
+    if (clearButton) {
       await clearButton.scrollIntoViewIfNeeded();
       await clearButton.click();
+      await this.waitForActiveFilterToClear(filterValue);
       return;
+    }
+
+    if (!this.isMobile) {
+      throw new Error(`Expected a visible clear button for the active "${filterValue}" filter chip.`);
     }
 
     const editButton = await this.visibleTestIdLocator(`active-filter-${filterValue}-edit`);
@@ -59,8 +68,19 @@ export class BasePage {
       }
     }
 
-    await this.dismissMobilePopoverSheet("dropdown-filter-popover");
-    await expect(popover).toBeHidden();
+    if (await popover.isVisible().catch(() => false)) {
+      await editButton.click();
+    }
+
+    if (await popover.isVisible().catch(() => false)) {
+      await this.dismissMobilePopoverSheet("dropdown-filter-popover");
+    }
+    await expect
+      .poll(async () => await popover.isVisible().catch(() => false), {
+        timeout: OVERLAY_DISMISS_TIMEOUT,
+        message: "Expected the dropdown filter popover to close on mobile.",
+      })
+      .toBe(false);
   }
 
   async clickNewSavedViewButton() {
@@ -190,7 +210,7 @@ export class BasePage {
 
     const [targetLabel] = targetLabels;
     const activeEditButton = await this.findVisibleTestIdLocator(`active-filter-${categoryKey}-edit`);
-    let clearedExistingSelection = false;
+    const hadActiveFilter = Boolean(activeEditButton);
     if (activeEditButton) {
       const currentSummary = ((await activeEditButton.textContent()) ?? "").replace(/\s+/g, " ").trim();
       if (currentSummary === targetLabel) {
@@ -199,13 +219,12 @@ export class BasePage {
 
       await this.clearActiveFilter(categoryKey);
       await this.waitForActiveFilterToClear(categoryKey);
-      clearedExistingSelection = true;
     }
 
     const addFilterPopover = await this.openVisibleAddFilter();
     const submenu = await this.openNestedFilterSubmenu(addFilterPopover, categoryKey);
     await this.waitForCheckboxFilterOptions(submenu, categoryKey, targetLabels);
-    if (clearedExistingSelection) {
+    if (hadActiveFilter) {
       await this.waitForCheckboxFilterSelectionState(submenu, categoryKey, []);
     }
     const targetOption = (await this.readCheckboxFilterOptionStates(submenu)).find(
@@ -341,24 +360,29 @@ export class BasePage {
   }
 
   async logout() {
-    const logoutButton = this.page.getByTestId("logout-button");
-    const navigationMenuButton = this.page.getByTestId("navigation-menu-button");
+    const loginForm = this.page.locator("#username");
 
-    // The current session can be invalidated server-side at any moment
-    // (e.g. cleanup deactivated the member this page is logged in as),
-    // making the app redirect to /auth on its own mid-logout. Treat
-    // either outcome — a successful logout click or the app's own
-    // redirect — as logged out instead of timing out on a button that
-    // no longer exists.
-    await expect(async () => {
-      if (this.page.url().includes("/auth")) {
-        return;
-      }
-      if (this.isMobile && !(await logoutButton.isVisible().catch(() => false))) {
-        await navigationMenuButton.click({ timeout: 2_000 });
-      }
-      await logoutButton.click({ timeout: 2_000 });
-    }).toPass({ timeout: DEFAULT_TIMEOUT });
+    if (this.page.url().includes("/auth") || (await loginForm.isVisible().catch(() => false))) {
+      return;
+    }
+
+    const logoutButton = this.page.getByTestId("logout-button");
+
+    if (!(await logoutButton.isVisible().catch(() => false))) {
+      await this.clickNavigationMenuIfMobile();
+    }
+
+    if (this.page.url().includes("/auth") || (await loginForm.isVisible().catch(() => false))) {
+      return;
+    }
+
+    if (!(await logoutButton.isVisible().catch(() => false))) {
+      await this.page.goto("/auth");
+      await expect(loginForm).toBeVisible();
+      return;
+    }
+
+    await logoutButton.click();
   }
 
   async validateTitle(expectedTitle: string) {
@@ -389,9 +413,9 @@ export class BasePage {
     await expect(this.page.getByText(text)).toBeVisible();
   }
 
-  async validateTextInToast(text: string) {
+  async validateTextInToast(text: string, timeout: number = DEFAULT_TIMEOUT) {
     const toast = this.page.getByTestId("toast").getByText(text);
-    await expect(toast).toBeVisible();
+    await expect(toast).toBeVisible({ timeout });
   }
 
   async validateTextInToastGroup(text: string) {
@@ -411,12 +435,33 @@ export class BasePage {
   }
 
   async dismissToast() {
-    const toast = this.page.getByTestId("toaster-container");
-    const dismissButton = this.page.getByRole("button", { name: "Dismiss" });
-    if (!(await dismissButton.isVisible())) {
-      await toast.click();
+    const toastContainer = this.page.getByTestId("toaster-container");
+    const groupedDismissButton = toastContainer.getByRole("button", { name: "Dismiss", exact: true });
+    const inlineDismissButton = toastContainer.getByTestId("toast").locator("button").first();
+
+    if (await groupedDismissButton.isVisible().catch(() => false)) {
+      await groupedDismissButton.click();
+      return;
     }
-    await toast.getByRole("button", { name: "Dismiss" }).click();
+
+    if (await inlineDismissButton.isVisible().catch(() => false)) {
+      await inlineDismissButton.click();
+      return;
+    }
+
+    await toastContainer.click({ position: { x: 8, y: 8 } });
+
+    if (await groupedDismissButton.isVisible().catch(() => false)) {
+      await groupedDismissButton.click();
+      return;
+    }
+
+    if (await inlineDismissButton.isVisible().catch(() => false)) {
+      await inlineDismissButton.click();
+      return;
+    }
+
+    throw new Error("Expected a visible toast dismiss control.");
   }
 
   async validateTextInModal(text: string) {
@@ -451,6 +496,22 @@ export class BasePage {
       }
     }
     return false;
+  }
+
+  private async dismissVisibleToastIfPresent() {
+    const toastContainer = this.page.getByTestId("toaster-container");
+    if (!(await toastContainer.isVisible().catch(() => false))) {
+      return;
+    }
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await this.dismissToast().catch(() => undefined);
+      await toastContainer.waitFor({ state: "hidden", timeout: OVERLAY_DISMISS_TIMEOUT }).catch(() => undefined);
+
+      if (!(await toastContainer.isVisible().catch(() => false))) {
+        return;
+      }
+    }
   }
 
   async validateButtonIsVisible(text: string) {
@@ -756,6 +817,15 @@ export class BasePage {
   }
 
   private async getVisibleAddFilterTrigger(): Promise<Locator> {
+    const namedButtons = this.page.getByRole("button", { name: "Add Filter", exact: true });
+    const namedButtonCount = await namedButtons.count();
+    for (let i = 0; i < namedButtonCount; i++) {
+      const button = namedButtons.nth(i);
+      if (await button.isVisible().catch(() => false)) {
+        return button;
+      }
+    }
+
     const triggers = this.page.getByTestId("filter-nested-add-filter");
     let visibleIndex = -1;
 
@@ -823,9 +893,13 @@ export class BasePage {
   }
 
   protected async dismissMobilePopoverSheet(popoverTestId: string) {
+    const popover = this.page.getByTestId(popoverTestId);
     const sheet = this.page.getByTestId(`${popoverTestId}-sheet`);
 
-    if (!(await sheet.isVisible().catch(() => false))) {
+    const isClosed = async () =>
+      !(await sheet.isVisible().catch(() => false)) && !(await popover.isVisible().catch(() => false));
+
+    if (await isClosed()) {
       return;
     }
 
@@ -839,10 +913,20 @@ export class BasePage {
       await this.page.mouse.click(1, 1).catch(() => undefined);
     }
 
+    if (await isClosed()) {
+      return;
+    }
+
     if (await sheet.isVisible().catch(() => false)) {
       await this.page.keyboard.press("Escape").catch(() => undefined);
-      await expect(sheet).toBeHidden();
     }
+
+    await expect
+      .poll(isClosed, {
+        timeout: OVERLAY_DISMISS_TIMEOUT,
+        message: `Expected the ${popoverTestId} mobile sheet to close.`,
+      })
+      .toBe(true);
   }
 
   protected async clickOverflowAction(text: string) {

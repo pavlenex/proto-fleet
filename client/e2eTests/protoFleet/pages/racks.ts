@@ -354,15 +354,15 @@ export class RacksPage extends BasePage {
     await this.getRackCard(label, zone).click();
   }
 
-  async clickViewList() {
-    await this.clickRackViewMode("View list");
+  async clickViewList(timeout: number = DEFAULT_TIMEOUT) {
+    await this.clickRackViewMode("View list", timeout);
   }
 
-  async clickViewGrid() {
-    await this.clickRackViewMode("View grid");
+  async clickViewGrid(timeout: number = DEFAULT_TIMEOUT) {
+    await this.clickRackViewMode("View grid", timeout);
   }
 
-  private async clickRackViewMode(label: "View grid" | "View list") {
+  private async clickRackViewMode(label: "View grid" | "View list", timeout: number) {
     const controls = this.page.getByTestId("segmented-control");
     let visibleControlIndex = -1;
 
@@ -384,7 +384,7 @@ export class RacksPage extends BasePage {
           return "hidden";
         },
         {
-          timeout: DEFAULT_TIMEOUT,
+          timeout,
           intervals: [DEFAULT_INTERVAL],
           message: `Expected the ${label} segmented control button to be visible.`,
         },
@@ -430,12 +430,14 @@ export class RacksPage extends BasePage {
   async waitForRackListToLoad({
     allowEmpty = true,
     requireManageAccess = true,
+    timeout = DEFAULT_TIMEOUT,
   }: {
     allowEmpty?: boolean;
     requireManageAccess?: boolean;
+    timeout?: number;
   } = {}) {
     if (requireManageAccess) {
-      await expect(this.page.getByRole("button", { name: "Add rack" }).first()).toBeVisible();
+      await expect(this.page.getByRole("button", { name: "Add rack" }).first()).toBeVisible({ timeout });
     }
 
     const rows = this.page.getByTestId("list-row");
@@ -456,11 +458,11 @@ export class RacksPage extends BasePage {
       const rowCountAfterDelay = await rows.count();
       // eslint-disable-next-line playwright/prefer-to-have-count -- intentionally non-retrying: verifies count has stabilized
       expect(rowCountAfterDelay).toBe(rowCount);
-    }).toPass({ timeout: DEFAULT_TIMEOUT, intervals: [DEFAULT_INTERVAL] });
+    }).toPass({ timeout, intervals: [DEFAULT_INTERVAL] });
   }
 
-  async listRackNames(): Promise<string[]> {
-    await this.waitForRackListToLoad();
+  async listRackNames(timeout: number = DEFAULT_TIMEOUT): Promise<string[]> {
+    await this.waitForRackListToLoad({ timeout });
 
     const nameCells = this.page.getByTestId("list-row").getByTestId("name");
     const count = await nameCells.count();
@@ -502,9 +504,9 @@ export class RacksPage extends BasePage {
     await expect(this.getRackListRow(label)).toHaveCount(0);
   }
 
-  async openRackFromList(label: string) {
+  async openRackFromList(label: string, timeout: number = DEFAULT_TIMEOUT) {
     const row = this.getRackListRow(label);
-    await expect(row).toBeVisible();
+    await expect(row).toBeVisible({ timeout });
     await row.getByTestId("name").getByRole("button", { name: label, exact: true }).click();
   }
 
@@ -533,17 +535,17 @@ export class RacksPage extends BasePage {
     await this.selectParentPickerTarget(buildingName);
   }
 
-  async deleteRackByLabelIfVisible(label: string) {
+  async deleteRackByLabelIfVisible(label: string, timeout: number = DEFAULT_TIMEOUT) {
     await this.navigateToRacksPage();
-    await this.tryAction(() => this.clickViewList());
-    if (!(await this.tryAction(() => this.openRackFromList(label)))) {
+    await this.tryAction(() => this.clickViewList(timeout), timeout);
+    if (!(await this.tryAction(() => this.openRackFromList(label, timeout), timeout))) {
       return;
     }
 
     await this.clickEditRack();
     await this.clickDeleteRack();
     await this.clickDeleteConfirm();
-    await this.tryAction(() => this.validateRackDeletedToast());
+    await this.tryAction(() => this.validateRackDeletedToast(timeout), timeout);
   }
 
   async clickEditRack() {
@@ -581,8 +583,8 @@ export class RacksPage extends BasePage {
     await this.clickButton("Delete");
   }
 
-  async validateRackDeletedToast() {
-    await this.validateTextInToast("Rack deleted");
+  async validateRackDeletedToast(timeout: number = DEFAULT_TIMEOUT) {
+    await this.validateTextInToast("Rack deleted", timeout);
   }
 
   async validateRackOverviewAssignedSlots(slotNumbers: readonly number[]) {
