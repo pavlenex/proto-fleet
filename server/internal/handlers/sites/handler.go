@@ -180,6 +180,54 @@ func (h *Handler) AssignRacksToSite(ctx context.Context, req *connect.Request[pb
 	}), nil
 }
 
+func (h *Handler) GetInfrastructureControlSubnets(ctx context.Context, req *connect.Request[pb.GetInfrastructureControlSubnetsRequest]) (*connect.Response[pb.GetInfrastructureControlSubnetsResponse], error) {
+	siteID := req.Msg.GetSiteId()
+	// Commissioning controls the deployment-global Modbus write boundary,
+	// so a grant narrowed to one site is insufficient even for that site.
+	info, err := middleware.RequireOrgWidePermission(ctx, authz.PermSiteManage)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := middleware.RequireAdmin(ctx, "view infrastructure control subnets"); err != nil {
+		return nil, err
+	}
+
+	subnets, err := h.service.GetInfrastructureControlSubnets(ctx, info.OrganizationID, siteID)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&pb.GetInfrastructureControlSubnetsResponse{
+		SiteId:                       siteID,
+		InfrastructureControlSubnets: subnets,
+	}), nil
+}
+
+func (h *Handler) SetInfrastructureControlSubnets(ctx context.Context, req *connect.Request[pb.SetInfrastructureControlSubnetsRequest]) (*connect.Response[pb.SetInfrastructureControlSubnetsResponse], error) {
+	siteID := req.Msg.GetSiteId()
+	// Keep reads and writes behind the same organization-wide topology gate.
+	info, err := middleware.RequireOrgWidePermission(ctx, authz.PermSiteManage)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := middleware.RequireAdmin(ctx, "commission infrastructure control subnets"); err != nil {
+		return nil, err
+	}
+
+	subnets, err := h.service.SetInfrastructureControlSubnets(
+		ctx,
+		info.OrganizationID,
+		siteID,
+		req.Msg.GetInfrastructureControlSubnets(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&pb.SetInfrastructureControlSubnetsResponse{
+		SiteId:                       siteID,
+		InfrastructureControlSubnets: subnets,
+	}), nil
+}
+
 func (h *Handler) GetSiteStats(ctx context.Context, req *connect.Request[pb.GetSiteStatsRequest]) (*connect.Response[pb.GetSiteStatsResponse], error) {
 	// GetSiteStats returns telemetry rollups + miner health buckets, so
 	// site:read alone isn't enough; we also gate on fleet:read. Both checks
