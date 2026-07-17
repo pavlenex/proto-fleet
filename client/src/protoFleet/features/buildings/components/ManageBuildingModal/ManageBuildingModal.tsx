@@ -4,6 +4,7 @@ import ManageRacksModal from "../ManageRacksModal";
 import SearchRacksModal from "../SearchRacksModal";
 import { type AssignmentEntry, buildByNameAssignments, buildManualAssignments } from "./assignmentMath";
 import BuildingGridPane from "./BuildingGridPane";
+import { buildingRackScope } from "./buildingRackScope";
 import BuildingRacksPane, { type AssignedRackRow } from "./BuildingRacksPane";
 import { type BuildingAssignmentMode, type GridCellKey, parseCellKey } from "./types";
 import { type RackPlacementInput, useBuildings } from "@/protoFleet/api/buildings";
@@ -48,6 +49,14 @@ const ManageBuildingModal = ({
   unassignedMinerCount,
 }: ManageBuildingModalProps) => {
   const { listBuildingRacks, assignRacksToBuilding } = useBuildings();
+
+  // Rack-fetch scope forwarded to both pickers so they list only racks
+  // eligible for this building (its site + site-unassigned) instead of the
+  // whole org. Derived from the building's own site — not the header
+  // SitePicker — so it stays correct on the unscoped /buildings/:id and
+  // /sites/:id routes where the persisted header selection may be an
+  // unrelated site. Computed once here so the rule lives in one place.
+  const rackScope = useMemo(() => buildingRackScope(building.siteId ?? 0n), [building.siteId]);
 
   // Aisles / racks_per_aisle are read straight from the building prop —
   // BuildingSettingsModal owns those fields now and threads any edits back
@@ -651,6 +660,7 @@ const ManageBuildingModal = ({
           open={showManageRacks}
           siteId={siteId}
           currentBuildingId={building.id}
+          scope={rackScope}
           initialSelectedRackIds={currentRackIds}
           onDismiss={() => setShowManageRacks(false)}
           onConfirm={handleManageRacksConfirm}
@@ -662,6 +672,7 @@ const ManageBuildingModal = ({
           open={showSearchRacks}
           siteId={siteId}
           currentBuildingId={building.id}
+          scope={rackScope}
           onDismiss={() => {
             setShowSearchRacks(false);
             setSelectedCellKey(null);

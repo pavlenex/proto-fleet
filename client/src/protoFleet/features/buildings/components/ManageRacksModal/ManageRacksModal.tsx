@@ -4,6 +4,7 @@ import { buildRackPickerItem, type RackPickerItem } from "../rackPickerItem";
 import { computeRackSelectionDelta } from "./rackSelectionDelta";
 import { useBuildings } from "@/protoFleet/api/buildings";
 import { useDeviceSets } from "@/protoFleet/api/useDeviceSets";
+import { type SiteFilterFields } from "@/protoFleet/components/PageHeader/SitePicker";
 import { ChevronDown } from "@/shared/assets/icons";
 import Button, { sizes, variants } from "@/shared/components/Button";
 import List from "@/shared/components/List";
@@ -18,6 +19,12 @@ interface ManageRacksModalProps {
   // Parent building context drives the eligibility split.
   siteId: bigint;
   currentBuildingId: bigint;
+  // Rack-fetch scope, derived from the building's own site (see
+  // buildingRackScope) — NOT the header SitePicker. Governs which racks are
+  // *fetched*: the building's site + site-unassigned. There is no "all sites"
+  // fallback; the fetch is always scoped. Per-row eligibility is still
+  // computed against `siteId`.
+  scope: SiteFilterFields;
   // Rack IDs currently in the building's working set. The modal seeds its
   // selection with these so the operator sees the current state and can
   // add / remove in one flow.
@@ -62,6 +69,7 @@ const ManageRacksModal = ({
   open,
   siteId,
   currentBuildingId,
+  scope,
   initialSelectedRackIds,
   onDismiss,
   onConfirm,
@@ -111,6 +119,8 @@ const ManageRacksModal = ({
     if (!open) return;
     let cancelled = false;
     void listRacks({
+      siteIds: scope.siteIds,
+      includeUnassigned: scope.includeUnassigned,
       onSuccess: (racks) => {
         if (cancelled) return;
         const out: RackPickerItem[] = [];
@@ -130,7 +140,7 @@ const ManageRacksModal = ({
     return () => {
       cancelled = true;
     };
-  }, [open, siteId, currentBuildingId, buildingMap, listRacks]);
+  }, [open, siteId, currentBuildingId, buildingMap, listRacks, scope.siteIds, scope.includeUnassigned]);
 
   const isRowDisabled = useCallback((item: RackPickerItem) => item.disabled, []);
 
