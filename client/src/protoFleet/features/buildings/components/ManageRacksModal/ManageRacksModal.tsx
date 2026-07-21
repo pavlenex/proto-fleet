@@ -1,16 +1,19 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { buildRackPickerItem, type RackPickerItem } from "../rackPickerItem";
-import { computeRackSelectionDelta } from "./rackSelectionDelta";
+import { buildRackPickerItem, describeRackReassignment, type RackPickerItem } from "../rackPickerItem";
+import { computeRackSelectionDelta, type RackSelectionDelta } from "./rackSelectionDelta";
 import { useBuildings } from "@/protoFleet/api/buildings";
 import { useDeviceSets } from "@/protoFleet/api/useDeviceSets";
 import { type SiteFilterFields } from "@/protoFleet/components/PageHeader/SitePicker";
-import { ChevronDown } from "@/shared/assets/icons";
+import { Alert, ChevronDown, Info } from "@/shared/assets/icons";
 import Button, { sizes, variants } from "@/shared/components/Button";
+import Dialog from "@/shared/components/Dialog";
 import List from "@/shared/components/List";
 import type { ColConfig, ColTitles } from "@/shared/components/List/types";
 import Modal, { ModalSelectAllFooter } from "@/shared/components/Modal";
 import ProgressCircular from "@/shared/components/ProgressCircular";
+import Switch from "@/shared/components/Switch";
+import { pushToast, STATUSES } from "@/shared/features/toaster";
 
 type RackPickerColumn = "name" | "building" | "status";
 
@@ -25,6 +28,13 @@ interface ManageRacksModalProps {
   // fallback; the fetch is always scoped. Per-row eligibility is still
   // computed against `siteId`.
   scope: SiteFilterFields;
+  // Broadened fetch scope used while "Show assigned racks" is ON, so
+  // already-placed (ineligible) racks surface for reparenting. All-sites header
+  // → global fetch (cross-site racks); scoped header → same as `scope` (the
+  // site scope already covers other-building same-site racks — the toggle just
+  // stops hiding them). See assignedRackScope.
+  assignedScope: SiteFilterFields;
+  buildingName: string;
   // Rack IDs currently in the building's working set. The modal seeds its
   // selection with these so the operator sees the current state and can
   // add / remove in one flow.
@@ -37,7 +47,9 @@ interface ManageRacksModalProps {
   // either list — the caller leaves them as-is. Delta-shape avoids
   // accidentally unassigning a seeded rack that didn't make it into
   // the listRacks response (race, paging gap, soft-delete window).
-  onConfirm: (delta: { added: { rackId: bigint; label: string }[]; removed: bigint[] }) => void;
+  // `delta.reassigned` reports the added racks that are being reparented so the
+  // host can gate the reparent confirm before committing.
+  onConfirm: (delta: RackSelectionDelta) => void;
 }
 
 const PAGE_SIZE = 25;
@@ -70,6 +82,8 @@ const ManageRacksModal = ({
   siteId,
   currentBuildingId,
   scope,
+  assignedScope,
+  buildingName,
   initialSelectedRackIds,
   onDismiss,
   onConfirm,
@@ -80,10 +94,48 @@ const ManageRacksModal = ({
   const [error, setError] = useState<string | null>(null);
   const [selectedItems, setSelectedItems] = useState<string[]>(() => initialSelectedRackIds.map((id) => id.toString()));
   const [page, setPage] = useState(0);
+  // "Show assigned racks" — default off, so the list starts with only the
+  // assignable set (this building's site + unassigned, eligible rows). Turning
+  // it on surfaces racks already placed in another building/site; they become
+  // selectable (reparenting moves them, behind a confirm) and are flagged with
+  // a warning icon.
+  const [showAssigned, setShowAssigned] = useState(false);
+  const [showAssignedInfo, setShowAssignedInfo] = useState(false);
+  // The reassignment row whose conflict dialog is open, or null.
+  const [conflictInfoItem, setConflictInfoItem] = useState<RackPickerItem | null>(null);
+  // Active fetch scope: broadened to `assignedScope` while the toggle is on so
+  // ineligible racks are actually fetched (cross-site when all-sites).
+  const activeScope = showAssigned ? assignedScope : scope;
   // Self-fetched building id → display label map for the Building
   // column. Falls back to "—" via the buildItem helper when an id is
   // missing (cross-site rack, or fetch in flight).
   const [buildingMap, setBuildingMap] = useState<Record<string, string>>({});
+
+  // Racks already in the working set. Passed to buildRackPickerItem so a seeded
+  // rack — including a reparent staged earlier this session but not yet Saved —
+  // classifies as "in this building" instead of being re-derived as a
+  // reassignment row from its stale server placement. Stable per open (the host
+  // only mutates entries on this picker's own confirm, which unmounts it).
+  const seededRackIds = useMemo(
+    () => new Set(initialSelectedRackIds.map((id) => id.toString())),
+    [initialSelectedRackIds],
+  );
+
+  // Ids of the ineligible (reassignment) racks currently loaded. Used to drop
+  // them from the selection when the toggle goes off — either explicitly, or as
+  // part of recovering from a failed broadened fetch below.
+  const reassignmentIdSet = useMemo(
+    () => new Set((items ?? []).filter((r) => r.reassignment).map((r) => r.id)),
+    [items],
+  );
+  // Mirrors of the toggle + reassignment set for the fetch effect's async error
+  // handler. Read via refs so the effect need not list them as deps —
+  // `reassignmentIdSet` gets a fresh identity on every `items` change, which in
+  // the deps array would trigger an endless refetch loop.
+  const showAssignedRef = useRef(showAssigned);
+  showAssignedRef.current = showAssigned;
+  const reassignmentIdSetRef = useRef(reassignmentIdSet);
+  reassignmentIdSetRef.current = reassignmentIdSet;
 
   useEffect(() => {
     if (!open) return;
@@ -119,13 +171,13 @@ const ManageRacksModal = ({
     if (!open) return;
     let cancelled = false;
     void listRacks({
-      siteIds: scope.siteIds,
-      includeUnassigned: scope.includeUnassigned,
+      siteIds: activeScope.siteIds,
+      includeUnassigned: activeScope.includeUnassigned,
       onSuccess: (racks) => {
         if (cancelled) return;
         const out: RackPickerItem[] = [];
         for (const rack of racks) {
-          const item = buildRackPickerItem(rack, siteId, currentBuildingId, buildingMap);
+          const item = buildRackPickerItem(rack, siteId, currentBuildingId, buildingMap, seededRackIds);
           if (item) out.push(item);
         }
         out.sort((a, b) => a.label.localeCompare(b.label));
@@ -133,6 +185,21 @@ const ManageRacksModal = ({
       },
       onError: (msg) => {
         if (cancelled) return;
+        // A failed *broadened* (toggle-on) fetch must not strand the operator:
+        // the full-modal error branch below hides the Switch, so they could
+        // never toggle back off. Instead keep the already-loaded eligible racks,
+        // revert the toggle, and surface the failure as a toast — the picker
+        // stays usable with the scoped set. Only the initial scoped fetch (which
+        // has nothing to fall back to) shows the blocking error state.
+        if (showAssignedRef.current) {
+          pushToast({ message: `Couldn't load assigned racks: ${msg}`, status: STATUSES.error });
+          const ineligible = reassignmentIdSetRef.current;
+          setShowAssigned(false);
+          setPage(0);
+          setSelectedItems((sel) => sel.filter((id) => !ineligible.has(id)));
+          setConflictInfoItem(null);
+          return;
+        }
         setError(msg);
         setItems([]);
       },
@@ -140,18 +207,87 @@ const ManageRacksModal = ({
     return () => {
       cancelled = true;
     };
-  }, [open, siteId, currentBuildingId, buildingMap, listRacks, scope.siteIds, scope.includeUnassigned]);
+  }, [
+    open,
+    siteId,
+    currentBuildingId,
+    buildingMap,
+    listRacks,
+    activeScope.siteIds,
+    activeScope.includeUnassigned,
+    seededRackIds,
+  ]);
 
-  const isRowDisabled = useCallback((item: RackPickerItem) => item.disabled, []);
+  // Toggle-off hides the ineligible (reassignment) rows entirely — the picker
+  // shows only the assignable set. Toggle-on keeps them, selectable and flagged.
+  const visibleItems = useMemo(() => {
+    if (!items) return undefined;
+    return showAssigned ? items : items.filter((r) => !r.reassignment);
+  }, [items, showAssigned]);
+
+  // With the toggle on, reassignment rows are intentionally selectable (behind
+  // the reparent confirm at commit); nothing else is ever disabled.
+  const isRowDisabled = useCallback((item: RackPickerItem) => item.disabled && !showAssigned, [showAssigned]);
+
+  // Flip the toggle and reset to the first page in one go — the visible set
+  // changes shape, so an out-of-range page would otherwise show empty. Turning
+  // the toggle OFF also drops any selected reassignment racks (they are now
+  // hidden, so leaving them selected would silently reparent them on Continue)
+  // and closes any open conflict dialog. A reparent accepted earlier in the
+  // session isn't a reassignment row anymore — it is seeded into this building's
+  // working set, so buildRackPickerItem classifies it in-this-building — so
+  // nothing seeded is at risk here. Matches Switch's setChecked signature
+  // (accepts a value or updater).
+  const handleToggleShowAssigned = useCallback(
+    (value: boolean | ((prev: boolean) => boolean)) => {
+      const next = typeof value === "function" ? value(showAssigned) : value;
+      setShowAssigned(next);
+      setPage(0);
+      if (!next) {
+        setSelectedItems((sel) => sel.filter((id) => !reassignmentIdSet.has(id)));
+        setConflictInfoItem(null);
+      }
+    },
+    [showAssigned, reassignmentIdSet],
+  );
+
+  // Name column renders a warning icon on reassignment rows while the toggle is
+  // on; tapping it opens the per-row conflict dialog. Other columns unchanged.
+  const listColConfig = useMemo<ColConfig<RackPickerItem, string, RackPickerColumn>>(() => {
+    if (!showAssigned) return colConfig;
+    return {
+      ...colConfig,
+      name: {
+        width: "min-w-32",
+        component: (item: RackPickerItem) => (
+          <div className="flex items-center justify-between gap-2">
+            <span>{item.label || "(unnamed rack)"}</span>
+            {item.reassignment ? (
+              <Button
+                variant={variants.textOnly}
+                textOnlyUnderlineOnHover={false}
+                ariaLabel="Reparent conflict — view details"
+                prefixIcon={<Alert className="text-text-emphasis" />}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setConflictInfoItem(item);
+                }}
+              />
+            ) : null}
+          </div>
+        ),
+      },
+    };
+  }, [showAssigned]);
 
   // Client-side pagination. List doesn't paginate on its own — it consumes
   // a flat items array — so we slice here and feed a per-page view.
   const pageItems = useMemo(() => {
-    if (!items) return [];
+    if (!visibleItems) return [];
     const start = page * PAGE_SIZE;
-    return items.slice(start, start + PAGE_SIZE);
-  }, [items, page]);
-  const totalItems = items?.length ?? 0;
+    return visibleItems.slice(start, start + PAGE_SIZE);
+  }, [visibleItems, page]);
+  const totalItems = visibleItems?.length ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
   const hasPreviousPage = page > 0;
   const hasNextPage = page < totalPages - 1;
@@ -163,9 +299,13 @@ const ManageRacksModal = ({
 
   const handleSelectAll = useCallback(() => {
     if (!items) return;
-    // Select-all promotes the *eligible* set (excluding disabled rows) to
-    // the selection — matches MinerSelectionList's footer behavior.
-    setSelectedItems(items.filter((r) => !r.disabled).map((r) => r.id));
+    // Footer "Select all" selects every eligible rack across all pages. It is
+    // only offered while the "Show assigned racks" toggle is off (see the footer
+    // wiring below), so no reassignment rows are on screen; the `!r.reassignment`
+    // filter still guards the same-site reassignment rows the fetch loads but
+    // keeps hidden. Bulk-selecting reparent rows stays possible only via the
+    // in-table header checkbox, which routes them through the reparent confirm.
+    setSelectedItems(items.filter((r) => !r.reassignment).map((r) => r.id));
   }, [items]);
 
   const handleSelectNone = useCallback(() => setSelectedItems([]), []);
@@ -205,7 +345,24 @@ const ManageRacksModal = ({
               <List<RackPickerItem, string, RackPickerColumn>
                 activeCols={activeCols}
                 colTitles={colTitles}
-                colConfig={colConfig}
+                colConfig={listColConfig}
+                headerControls={
+                  <div className="flex items-center gap-1 px-1">
+                    <Button
+                      variant={variants.textOnly}
+                      textOnlyUnderlineOnHover={false}
+                      ariaLabel="About “Show assigned racks”"
+                      prefixIcon={<Info className="text-text-primary-70" />}
+                      onClick={() => setShowAssignedInfo(true)}
+                    />
+                    <Switch
+                      label="Show assigned racks"
+                      ariaLabel="Show assigned racks"
+                      checked={showAssigned}
+                      setChecked={handleToggleShowAssigned}
+                    />
+                  </div>
+                }
                 items={pageItems}
                 itemKey="id"
                 itemSelectable
@@ -252,12 +409,36 @@ const ManageRacksModal = ({
             <div className="shrink-0">
               <ModalSelectAllFooter
                 label={`${selectedItems.length} ${selectedItems.length === 1 ? "rack" : "racks"} selected`}
-                onSelectAll={handleSelectAll}
+                // Hide "Select all" while ineligible (reassignment) racks are on
+                // screen — a bulk select-all can't sweep them into a reparent.
+                // Matches MinerSelectionList, which drops select-all when its
+                // "Show assigned" toggle is on. The in-table header checkbox
+                // still selects the whole page (reparent rows included), gated by
+                // the reparent confirm on Continue.
+                onSelectAll={showAssigned ? undefined : handleSelectAll}
                 onSelectNone={handleSelectNone}
               />
             </div>
           </>
         )}
+        {showAssignedInfo ? (
+          <Dialog
+            icon={<Info />}
+            title="Show assigned racks"
+            subtitle="Shows or hides racks that are already placed in another building or site. Assigning one of these racks to this building moves the rack — and every miner in it — out of its current placement."
+            onDismiss={() => setShowAssignedInfo(false)}
+            buttons={[{ text: "Got it", variant: variants.primary, onClick: () => setShowAssignedInfo(false) }]}
+          />
+        ) : null}
+        {conflictInfoItem ? (
+          <Dialog
+            icon={<Alert className="text-text-emphasis" />}
+            title="Reparent conflict"
+            subtitle={describeRackReassignment(conflictInfoItem, buildingName)}
+            onDismiss={() => setConflictInfoItem(null)}
+            buttons={[{ text: "Got it", variant: variants.primary, onClick: () => setConflictInfoItem(null) }]}
+          />
+        ) : null}
       </div>
     </Modal>
   );
