@@ -128,6 +128,7 @@ import (
 	"github.com/block/proto-fleet/server/internal/infrastructure/db"
 	"github.com/block/proto-fleet/server/internal/infrastructure/mqttclient"
 	"github.com/block/proto-fleet/server/internal/infrastructure/server"
+	"github.com/block/proto-fleet/server/internal/runtimejobs"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -796,6 +797,33 @@ func start(config *Config) error {
 		return fmt.Errorf("server shutting down: %+v", err)
 	}
 	return nil
+}
+
+// stopStandaloneJob gives work one graceful-shutdown budget, then one final
+// bounded drain budget. Stop is synchronous, so both budgets rely on the
+// implementation honoring the supplied contexts.
+func stopStandaloneJob(name string, job runtimejobs.Lifecycle) {
+	stopStandaloneJobWithTimeout(name, job, shutdownTimeout)
+}
+
+func stopStandaloneJobWithTimeout(name string, job runtimejobs.Lifecycle, timeout time.Duration) {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	err := job.Stop(shutdownCtx)
+	shutdownErr := shutdownCtx.Err()
+	cancel()
+	if err == nil {
+		return
+	}
+	if !errors.Is(shutdownErr, context.DeadlineExceeded) {
+		slog.Error("failed to stop runtime job", "job", name, "error", err)
+		return
+	}
+	slog.Error("runtime job exceeded shutdown timeout", "job", name, "error", err)
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), timeout)
+	defer drainCancel()
+	if err := job.Stop(drainCtx); err != nil {
+		slog.Error("failed to drain runtime job", "job", name, "error", err)
+	}
 }
 
 func newHTTP2Server(config HTTPConfig) *http2.Server {
