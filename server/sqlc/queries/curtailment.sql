@@ -194,6 +194,7 @@ INSERT INTO curtailment_event (
     mode_params_jsonb,
     curtail_batch_size,
     curtail_batch_interval_sec,
+    last_curtail_pending_dispatch_at,
     restore_batch_size,
     restore_batch_interval_sec,
     min_curtailed_duration_sec,
@@ -232,6 +233,7 @@ INSERT INTO curtailment_event (
     sqlc.arg('mode_params_jsonb'),
     sqlc.narg('curtail_batch_size'),
     sqlc.arg('curtail_batch_interval_sec'),
+    NULL,
     sqlc.arg('restore_batch_size'),
     sqlc.arg('restore_batch_interval_sec'),
     sqlc.arg('min_curtailed_duration_sec'),
@@ -307,7 +309,7 @@ FOR UPDATE;
 SELECT
     id, event_uuid, org_id, state, mode, strategy, level, priority,
     loop_type, scope_type, scope_jsonb, mode_params_jsonb,
-    curtail_batch_size, curtail_batch_interval_sec,
+    curtail_batch_size, curtail_batch_interval_sec, last_curtail_pending_dispatch_at,
     restore_batch_size, restore_batch_interval_sec, effective_batch_size,
     min_curtailed_duration_sec, max_duration_seconds, allow_unbounded,
     include_maintenance, force_include_maintenance, force_include_all_paired_miners,
@@ -514,7 +516,7 @@ RETURNING *;
 SELECT
     id, event_uuid, org_id, state, mode, strategy, level, priority,
     loop_type, scope_type, scope_jsonb, mode_params_jsonb,
-    curtail_batch_size, curtail_batch_interval_sec,
+    curtail_batch_size, curtail_batch_interval_sec, last_curtail_pending_dispatch_at,
     restore_batch_size, restore_batch_interval_sec, effective_batch_size,
     min_curtailed_duration_sec, max_duration_seconds, allow_unbounded,
     include_maintenance, force_include_maintenance, force_include_all_paired_miners,
@@ -572,7 +574,7 @@ LIMIT sqlc.arg('row_limit')::BIGINT;
 SELECT
     ce.id, ce.event_uuid, ce.org_id, ce.state, ce.mode, ce.strategy, ce.level, ce.priority,
     ce.loop_type, ce.scope_type, ce.scope_jsonb, ce.mode_params_jsonb,
-    ce.curtail_batch_size, ce.curtail_batch_interval_sec,
+    ce.curtail_batch_size, ce.curtail_batch_interval_sec, ce.last_curtail_pending_dispatch_at,
     ce.restore_batch_size, ce.restore_batch_interval_sec, ce.effective_batch_size,
     ce.min_curtailed_duration_sec, ce.max_duration_seconds, ce.allow_unbounded,
     ce.include_maintenance, ce.force_include_maintenance, ce.force_include_all_paired_miners,
@@ -1154,6 +1156,13 @@ WHERE id = sqlc.arg('id')
   AND state = sqlc.arg('expected_state')
   AND state IN ('pending', 'active', 'restoring');
 
+-- name: RecordCurtailPendingDispatch :execrows
+UPDATE curtailment_event
+SET last_curtail_pending_dispatch_at = sqlc.arg('dispatched_at')
+WHERE id = sqlc.arg('id')
+  AND state = sqlc.arg('expected_state')
+  AND state IN ('pending', 'active');
+
 -- name: UpdateCurtailmentEventFanState :execrows
 -- The expected-state guard prevents a stale reconciler phase from stamping
 -- over a concurrent transition. Terminal states remain addressable so an
@@ -1255,7 +1264,8 @@ WHERE curtailment_event_id = sqlc.arg('curtailment_event_id')
 UPDATE curtailment_event
 SET state = 'pending',
     fan_airflow_reopened_at = COALESCE(fan_on_sent_at, fan_airflow_reopened_at),
-    fan_on_sent_at = NULL
+    fan_on_sent_at = NULL,
+    last_curtail_pending_dispatch_at = NULL
 WHERE id = sqlc.arg('id')
   AND state = 'restoring'
 RETURNING *;
