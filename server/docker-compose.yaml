@@ -43,16 +43,41 @@ services:
       PLUGINS_DIR: "/app/plugins"
       PLUGINS_ENABLED: "true"
       PROTO_MINER_PORT: "8080"
+      SV2_TRANSLATOR_ENABLED: "true"
+      SV2_TRANSLATOR_CONFIG_DIR: "/var/lib/fleet/sv2-translator"
+      SV2_TRANSLATOR_ADVERTISE_HOST: "${SV2_TRANSLATOR_ADVERTISE_HOST:-sv2-translator}"
+      SV2_TRANSLATOR_CONNECT_HOST: "sv2-translator"
     depends_on:
       timescaledb:
         condition: service_healthy
+      sv2-translator:
+        condition: service_started
     volumes:
       - ./plugins:/app/plugins:ro
+      - sv2-translator-config:/var/lib/fleet/sv2-translator
     restart: unless-stopped
     networks:
       - fleet-network
     ports:
       - "4000:4000"
+
+  sv2-translator:
+    image: stratumv2/translator_sv2:v0.6.0@sha256:674fa7374deaf36859d2b3ad31df6adc79169d7108a1cd39fe3e14d04a0ca66c
+    entrypoint: [ "/bin/sh", "/supervise.sh" ]
+    environment:
+      CONFIG_DIR: "/config"
+    volumes:
+      - sv2-translator-config:/config
+      - ../deployment-files/sv2-translator/supervise.sh:/supervise.sh:ro
+    # Development uses a bridge network for the bundled miner simulators.
+    # Publishing the route range makes the same listeners reachable by
+    # physical LAN miners through SV2_TRANSLATOR_ADVERTISE_HOST.
+    ports:
+      - "34255-34354:34255-34354"
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    networks:
+      - fleet-network
 
   timescaledb:
     extends:
@@ -60,6 +85,10 @@ services:
       service: timescaledb
     build:
       context: ./timescaledb
+    # Keep the container's canonical PostgreSQL port while avoiding conflicts
+    # with host-installed databases and other local projects.
+    ports: !override
+      - "${DB_HOST_PORT:-5434}:5432"
     # Development performance optimizations
     # NOTE: This command completely overrides the base config. Keep work_mem in sync
     # with docker-compose.base.yaml (Docker Compose replaces arrays, doesn't merge them).
@@ -332,6 +361,7 @@ services:
       - NET_RAW
 volumes:
   timescaledb-data:
+  sv2-translator-config:
 
 networks:
   fleet-network:

@@ -78,6 +78,27 @@ Virtual miners simulate both network latency and miner processing latency. The
 default miner-internal latency is 200-500ms, with occasional 5-8s outliers.
 Generation is capped at 50,000 virtual miners per plugin process.
 
+## Stratum V2 Translation Proxy
+
+Proto Fleet starts the bundled Stratum V2 Translator automatically when an
+operator assigns a `stratum2+tcp://` pool. Each distinct pool URL and username
+gets a stable local SV1 listener, so existing SV1 miners can use the SV2
+upstream without firmware changes.
+
+The listener address is normally detected from the Proto Fleet host. If the
+host has multiple network interfaces, set the miner-reachable address in the
+deployment `.env` file:
+
+```bash
+SV2_TRANSLATOR_ADVERTISE_HOST=192.168.1.10
+```
+
+Translator listeners are allocated from TCP port `34255` upward. Permit that
+traffic from miner networks to the Proto Fleet host, and restrict it at the
+firewall to trusted miner subnets. Pool assignment remains in its loading
+state until the required listener is accepting connections; a startup failure
+leaves the miners' prior pool settings unchanged.
+
 ## Facility Infrastructure Control
 
 Direct Modbus TCP writes are disabled unless the deployment and the target

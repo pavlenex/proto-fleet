@@ -635,6 +635,7 @@ type Querier interface {
 	// Used to determine if an upsert should update an existing error or insert a new one.
 	// PostgreSQL uses IS NOT DISTINCT FROM for NULL-safe comparison (MySQL uses <=>)
 	GetOpenErrorByDedupKey(ctx context.Context, arg GetOpenErrorByDedupKeyParams) (Error, error)
+	GetOrCreateSV2TranslatorRoute(ctx context.Context, arg GetOrCreateSV2TranslatorRouteParams) (Sv2TranslatorRoute, error)
 	// Returns hourly aggregates for the current devices in an org.
 	// COALESCE handles NULL values from AVG() when all source values are NULL
 	GetOrgDeviceMetricsHourlyAggregates(ctx context.Context, arg GetOrgDeviceMetricsHourlyAggregatesParams) ([]DeviceMetricsHourly, error)
@@ -702,6 +703,7 @@ type Querier interface {
 	// record.
 	GetRoleByIDForUpdate(ctx context.Context, id int64) (Role, error)
 	GetRunningPowerTargetScheduleOverlaps(ctx context.Context, arg GetRunningPowerTargetScheduleOverlapsParams) ([]GetRunningPowerTargetScheduleOverlapsRow, error)
+	GetSV2TranslatorRouteByPort(ctx context.Context, arg GetSV2TranslatorRouteByPortParams) (Sv2TranslatorRoute, error)
 	GetSchedule(ctx context.Context, arg GetScheduleParams) (GetScheduleRow, error)
 	GetScheduleByIDForProcessor(ctx context.Context, id int64) (Schedule, error)
 	// GetScheduleForUpdate is the row-locking variant used by ResumeSchedule

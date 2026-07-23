@@ -455,7 +455,8 @@ jobs:
           cp deployment-files/uninstall.sh deployment/
           cp -r deployment-files/scripts deployment/
           cp -r deployment-files/profiles deployment/
-          chmod +x deployment/run-fleet.sh deployment/uninstall.sh deployment/scripts/*.sh
+          cp -r deployment-files/sv2-translator deployment/
+          chmod +x deployment/run-fleet.sh deployment/uninstall.sh deployment/scripts/*.sh deployment/sv2-translator/supervise.sh
 
           mkdir -p deployment/images
           cp /tmp/timescaledb-images/timescaledb-${{ matrix.arch }}.tar.gz deployment/images/timescaledb.tar.gz

@@ -1,6 +1,7 @@
 package sv2
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -35,6 +36,28 @@ func TestPoolNoiseKeyFromURL_DecodesSRIFramedBase58(t *testing.T) {
 	// Assert
 	require.NoError(t, err)
 	assert.Len(t, key, 32, "framed pubkey should yield 32 raw key bytes")
+}
+
+func TestCanonicalAuthorityPublicKeyFromURL_PreservesCanonicalSRIKey(t *testing.T) {
+	const authorityKey = "9awtMD5KQgvRUh2yFbjVeT7b6hjipWcAsQHd6wEhgtDT9soosna"
+
+	got, err := CanonicalAuthorityPublicKeyFromURL("stratum2+tcp://pool.example.com:3336/" + authorityKey)
+
+	require.NoError(t, err)
+	assert.Equal(t, authorityKey, got)
+}
+
+func TestCanonicalAuthorityPublicKeyFromURL_ConvertsHexKey(t *testing.T) {
+	const authorityKey = "9awtMD5KQgvRUh2yFbjVeT7b6hjipWcAsQHd6wEhgtDT9soosna"
+	decoded, err := PoolNoiseKeyFromURL("stratum2+tcp://pool.example.com:3336/" + authorityKey)
+	require.NoError(t, err)
+
+	got, err := CanonicalAuthorityPublicKeyFromURL(
+		"stratum2+tcp://pool.example.com:3336/" + fmt.Sprintf("%x", decoded),
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, authorityKey, got)
 }
 
 func TestPoolNoiseKeyFromURL_RejectsInvalidPubKey(t *testing.T) {

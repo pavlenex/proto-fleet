@@ -304,7 +304,13 @@ const PoolSelectionPage = ({
   };
 
   const numberOfMiners = numberOfMinersOverride ?? deviceIdentifiers.length;
-  const buttonText = `Assign to ${numberOfMiners} miner${numberOfMiners === 1 ? "" : "s"}`;
+  const includesSV2Pool = assignedPoolData.some((pool) =>
+    pool.poolUrl.trim().toLowerCase().startsWith("stratum2+tcp://"),
+  );
+  const buttonText =
+    isAssigning && includesSV2Pool
+      ? "Starting SV2 proxy..."
+      : `Assign to ${numberOfMiners} miner${numberOfMiners === 1 ? "" : "s"}`;
   const isSingleMinerEdit = numberOfMiners === 1;
   const isLoadingInitialState = isSingleMinerEdit && isLoadingAssignments;
   const hasConfiguredPools = assignedPoolData.length > 0;

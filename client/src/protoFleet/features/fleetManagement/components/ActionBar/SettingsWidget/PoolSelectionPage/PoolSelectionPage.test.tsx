@@ -23,6 +23,12 @@ const mockPools = [
     url: "stratum+tcp://mine.ocean.xyz:3325",
     username: "user3",
   }),
+  create(PoolSchema, {
+    poolId: BigInt(4),
+    poolName: "Client pool SV2",
+    url: "stratum2+tcp://v2.example.com:3336/9awtMD5KQgvRUh2yFbjVeT7b6hjipWcAsQHd6wEhgtDT9soosna",
+    username: "user4",
+  }),
 ];
 
 const mockValidatePool = vi.fn(({ onSuccess, onFinally }) => {
@@ -321,6 +327,40 @@ describe("Pool selection page", () => {
         backup1Pool: { type: "poolId", poolId: "2" },
         backup2Pool: undefined,
       });
+    });
+  });
+
+  test("shows SV2 proxy startup while assigning an SV2 pool", async () => {
+    let finishAssignment: (() => void) | undefined;
+    const pendingAssignment = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishAssignment = resolve;
+        }),
+    );
+    const { getByText, getByTestId, getAllByText } = render(
+      <PoolSelectionPage
+        deviceIdentifiers={deviceIdentifiers}
+        onAssignPools={pendingAssignment}
+        onDismiss={onCancel}
+      />,
+    );
+
+    fireEvent.click(getByTestId("add-pool-button"));
+    await waitFor(() => expect(getByText("Select pool")).toBeInTheDocument());
+    fireEvent.click(getByText("Client pool SV2"));
+    fireEvent.click(getAllByText("Save").find((btn) => btn.closest("button")) as HTMLElement);
+    await waitFor(() => expect(getByTestId("pool-row-0")).toBeInTheDocument());
+
+    fireEvent.click(getByText(`Assign to ${numberOfMiners} miners`));
+
+    await waitFor(() => {
+      expect(getByText("Starting SV2 proxy...")).toBeInTheDocument();
+    });
+
+    finishAssignment?.();
+    await waitFor(() => {
+      expect(getByText(`Assign to ${numberOfMiners} miners`)).toBeInTheDocument();
     });
   });
 

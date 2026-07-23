@@ -24,6 +24,7 @@ import (
 	"github.com/block/proto-fleet/server/internal/handlers/health"
 
 	"github.com/block/proto-fleet/server/internal/infrastructure/queue"
+	"github.com/block/proto-fleet/server/internal/infrastructure/sv2translator"
 	"github.com/block/proto-fleet/server/internal/infrastructure/sysmon"
 	"github.com/block/proto-fleet/server/internal/infrastructure/timescaledb"
 
@@ -241,6 +242,16 @@ func start(config *Config) error {
 
 	userStore := sqlstores.NewSQLUserStore(conn)
 	poolStore := sqlstores.NewSQLPoolStore(conn, encryptSvc)
+	var sv2Translator *sv2translator.Manager
+	if config.SV2Translator.Enabled {
+		sv2Translator, err = sv2translator.NewManager(
+			config.SV2Translator,
+			sv2translator.NewSQLRouteStore(conn),
+		)
+		if err != nil {
+			return fmt.Errorf("configure Stratum V2 Translator: %w", err)
+		}
+	}
 	deviceStore := sqlstores.NewSQLDeviceStore(conn)
 	collectionStore := sqlstores.NewSQLCollectionStore(conn, config.TimescaleDB.MaxAge)
 	activityStore := sqlstores.NewSQLActivityStore(conn)
@@ -494,6 +505,9 @@ func start(config *Config) error {
 	statusService := commandDomain.NewStatusService(conn, dbMessageQueue)
 	commandSvc := commandDomain.NewService(&config.Command, conn, executionService, dbMessageQueue, statusService, encryptSvc, filesService, deviceStore, userStore, authSvc, telemetryService, pluginService, activitySvc)
 	commandSvc.SetPluginCapabilitiesProvider(pluginService)
+	if sv2Translator != nil {
+		commandSvc.SetSV2TranslatorRouter(sv2Translator)
+	}
 	// buildingStore is constructed below alongside siteStore; both are
 	// needed for the parseFilter cross-org check on building_ids and
 	// zone_keys. Hoist the construction so fleetMgmtSvc can depend on it.
@@ -501,6 +515,9 @@ func start(config *Config) error {
 	buildingStore := sqlstores.NewSQLBuildingStore(conn)
 	fleetMgmtSvc := fleetmanagementDomain.NewService(deviceStore, discoveredDeviceStore, telemetryService, minerService, pluginService, poolStore, errorStore, collectionStore, buildingStore, commandSvc, activitySvc)
 	fleetMgmtSvc.WithOptionsCache(fleetOptionsCache)
+	if sv2Translator != nil {
+		fleetMgmtSvc.WithSV2TranslatorRouteResolver(sv2Translator)
+	}
 	// Filtered "select all" command dispatch resolves its MinerListFilter through
 	// the fleetmanagement resolver; wire it now that fleetMgmtSvc exists (it
 	// depends on commandSvc, so this can't be passed to NewService).

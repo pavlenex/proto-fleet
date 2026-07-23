@@ -672,6 +672,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getOpenErrorByDedupKeyStmt, err = db.PrepareContext(ctx, getOpenErrorByDedupKey); err != nil {
 		return nil, fmt.Errorf("error preparing query GetOpenErrorByDedupKey: %w", err)
 	}
+	if q.getOrCreateSV2TranslatorRouteStmt, err = db.PrepareContext(ctx, getOrCreateSV2TranslatorRoute); err != nil {
+		return nil, fmt.Errorf("error preparing query GetOrCreateSV2TranslatorRoute: %w", err)
+	}
 	if q.getOrgDeviceMetricsHourlyAggregatesStmt, err = db.PrepareContext(ctx, getOrgDeviceMetricsHourlyAggregates); err != nil {
 		return nil, fmt.Errorf("error preparing query GetOrgDeviceMetricsHourlyAggregates: %w", err)
 	}
@@ -746,6 +749,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getRunningPowerTargetScheduleOverlapsStmt, err = db.PrepareContext(ctx, getRunningPowerTargetScheduleOverlaps); err != nil {
 		return nil, fmt.Errorf("error preparing query GetRunningPowerTargetScheduleOverlaps: %w", err)
+	}
+	if q.getSV2TranslatorRouteByPortStmt, err = db.PrepareContext(ctx, getSV2TranslatorRouteByPort); err != nil {
+		return nil, fmt.Errorf("error preparing query GetSV2TranslatorRouteByPort: %w", err)
 	}
 	if q.getScheduleStmt, err = db.PrepareContext(ctx, getSchedule); err != nil {
 		return nil, fmt.Errorf("error preparing query GetSchedule: %w", err)
@@ -2615,6 +2621,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getOpenErrorByDedupKeyStmt: %w", cerr)
 		}
 	}
+	if q.getOrCreateSV2TranslatorRouteStmt != nil {
+		if cerr := q.getOrCreateSV2TranslatorRouteStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getOrCreateSV2TranslatorRouteStmt: %w", cerr)
+		}
+	}
 	if q.getOrgDeviceMetricsHourlyAggregatesStmt != nil {
 		if cerr := q.getOrgDeviceMetricsHourlyAggregatesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getOrgDeviceMetricsHourlyAggregatesStmt: %w", cerr)
@@ -2738,6 +2749,11 @@ func (q *Queries) Close() error {
 	if q.getRunningPowerTargetScheduleOverlapsStmt != nil {
 		if cerr := q.getRunningPowerTargetScheduleOverlapsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getRunningPowerTargetScheduleOverlapsStmt: %w", cerr)
+		}
+	}
+	if q.getSV2TranslatorRouteByPortStmt != nil {
+		if cerr := q.getSV2TranslatorRouteByPortStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getSV2TranslatorRouteByPortStmt: %w", cerr)
 		}
 	}
 	if q.getScheduleStmt != nil {
@@ -4300,6 +4316,7 @@ type Queries struct {
 	getMinerStateSnapshotsStmt                                   *sql.Stmt
 	getOfflineDevicesStmt                                        *sql.Stmt
 	getOpenErrorByDedupKeyStmt                                   *sql.Stmt
+	getOrCreateSV2TranslatorRouteStmt                            *sql.Stmt
 	getOrgDeviceMetricsHourlyAggregatesStmt                      *sql.Stmt
 	getOrgDeviceMetricsRawBucketAggregatesStmt                   *sql.Stmt
 	getOrgDeviceStatusHourlyAggregatesStmt                       *sql.Stmt
@@ -4325,6 +4342,7 @@ type Queries struct {
 	getRoleByIDStmt                                              *sql.Stmt
 	getRoleByIDForUpdateStmt                                     *sql.Stmt
 	getRunningPowerTargetScheduleOverlapsStmt                    *sql.Stmt
+	getSV2TranslatorRouteByPortStmt                              *sql.Stmt
 	getScheduleStmt                                              *sql.Stmt
 	getScheduleByIDForProcessorStmt                              *sql.Stmt
 	getScheduleForUpdateStmt                                     *sql.Stmt
@@ -4808,6 +4826,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getMinerStateSnapshotsStmt:                                   q.getMinerStateSnapshotsStmt,
 		getOfflineDevicesStmt:                                        q.getOfflineDevicesStmt,
 		getOpenErrorByDedupKeyStmt:                                   q.getOpenErrorByDedupKeyStmt,
+		getOrCreateSV2TranslatorRouteStmt:                            q.getOrCreateSV2TranslatorRouteStmt,
 		getOrgDeviceMetricsHourlyAggregatesStmt:                      q.getOrgDeviceMetricsHourlyAggregatesStmt,
 		getOrgDeviceMetricsRawBucketAggregatesStmt:                   q.getOrgDeviceMetricsRawBucketAggregatesStmt,
 		getOrgDeviceStatusHourlyAggregatesStmt:                       q.getOrgDeviceStatusHourlyAggregatesStmt,
@@ -4833,6 +4852,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getRoleByIDStmt:                                              q.getRoleByIDStmt,
 		getRoleByIDForUpdateStmt:                                     q.getRoleByIDForUpdateStmt,
 		getRunningPowerTargetScheduleOverlapsStmt:                    q.getRunningPowerTargetScheduleOverlapsStmt,
+		getSV2TranslatorRouteByPortStmt:                              q.getSV2TranslatorRouteByPortStmt,
 		getScheduleStmt:                                              q.getScheduleStmt,
 		getScheduleByIDForProcessorStmt:                              q.getScheduleByIDForProcessorStmt,
 		getScheduleForUpdateStmt:                                     q.getScheduleForUpdateStmt,

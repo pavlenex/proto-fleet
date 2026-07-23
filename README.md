@@ -148,6 +148,15 @@ just dev
 
 This starts the Go backend with Docker Compose and the Vite dev server for ProtoFleet at http://localhost:5173.
 
+The development launcher also detects the host's default-route IPv4 address
+and publishes the Stratum V2 Translator listener range so pool assignments can
+be tested with either the bundled Docker miner simulators or physical miners
+on the LAN. Override detection when needed:
+
+```bash
+SV2_TRANSLATOR_ADVERTISE_HOST=192.168.1.10 just dev
+```
+
 #### LAN access
 
 The Go backend is already reachable on your LAN at `http://<your-ip>:4000` because the container publishes `4000:4000` and binds to `0.0.0.0`. The Vite dev server, however, binds to localhost (loopback) by default.

@@ -50,6 +50,41 @@ func (q *Queries) DeletePool(ctx context.Context, id int64) error {
 	return err
 }
 
+const getOrCreateSV2TranslatorRoute = `-- name: GetOrCreateSV2TranslatorRoute :one
+INSERT INTO sv2_translator_route (
+    org_id,
+    upstream_url,
+    username,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+ON CONFLICT (org_id, upstream_url, username)
+DO UPDATE SET updated_at = sv2_translator_route.updated_at
+RETURNING id, org_id, upstream_url, username, listen_port, created_at, updated_at
+`
+
+type GetOrCreateSV2TranslatorRouteParams struct {
+	OrgID       int64
+	UpstreamUrl string
+	Username    string
+}
+
+func (q *Queries) GetOrCreateSV2TranslatorRoute(ctx context.Context, arg GetOrCreateSV2TranslatorRouteParams) (Sv2TranslatorRoute, error) {
+	row := q.queryRow(ctx, q.getOrCreateSV2TranslatorRouteStmt, getOrCreateSV2TranslatorRoute, arg.OrgID, arg.UpstreamUrl, arg.Username)
+	var i Sv2TranslatorRoute
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.UpstreamUrl,
+		&i.Username,
+		&i.ListenPort,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getPool = `-- name: GetPool :one
 SELECT id, org_id, pool_name, url, username, password_enc, created_at, updated_at, deleted_at
 FROM pool
@@ -76,6 +111,33 @@ func (q *Queries) GetPool(ctx context.Context, arg GetPoolParams) (Pool, error) 
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
+	)
+	return i, err
+}
+
+const getSV2TranslatorRouteByPort = `-- name: GetSV2TranslatorRouteByPort :one
+SELECT id, org_id, upstream_url, username, listen_port, created_at, updated_at
+FROM sv2_translator_route
+WHERE org_id = $1
+  AND listen_port = $2
+`
+
+type GetSV2TranslatorRouteByPortParams struct {
+	OrgID      int64
+	ListenPort int32
+}
+
+func (q *Queries) GetSV2TranslatorRouteByPort(ctx context.Context, arg GetSV2TranslatorRouteByPortParams) (Sv2TranslatorRoute, error) {
+	row := q.queryRow(ctx, q.getSV2TranslatorRouteByPortStmt, getSV2TranslatorRouteByPort, arg.OrgID, arg.ListenPort)
+	var i Sv2TranslatorRoute
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.UpstreamUrl,
+		&i.Username,
+		&i.ListenPort,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }

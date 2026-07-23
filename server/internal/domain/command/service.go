@@ -50,6 +50,15 @@ type PluginCapabilitiesProvider interface {
 	GetRawCapabilitiesForDevice(ctx context.Context, driverName, manufacturer, model string) sdk.Capabilities
 }
 
+type SV2TranslatorRouter interface {
+	Route(
+		ctx context.Context,
+		organizationID int64,
+		upstreamURL string,
+		username string,
+	) (localURL string, localUsername string, localPassword string, err error)
+}
+
 // UserCredentialsVerifier provides interface for verifying user credentials
 type UserCredentialsVerifier interface {
 	VerifyCredentials(ctx context.Context, username, password string) error
@@ -70,6 +79,7 @@ type Service struct {
 	credentialsVerifier UserCredentialsVerifier
 	telemetryListener   TelemetryListener
 	pluginCaps          PluginCapabilitiesProvider
+	sv2Translator       SV2TranslatorRouter
 	capabilityChecker   *CapabilityChecker
 	activitySvc         *activity.Service
 	deviceResolver      DeviceIdentifierResolver
@@ -94,6 +104,12 @@ type resolvedDevice struct {
 // SetPluginCapabilitiesProvider — nil disables the SV2 gate (test default).
 func (s *Service) SetPluginCapabilitiesProvider(p PluginCapabilitiesProvider) {
 	s.pluginCaps = p
+}
+
+// SetSV2TranslatorRouter enables the deployed SV1-to-SV2 translation path.
+// Nil preserves the native-SV2 capability gate for non-containerized uses.
+func (s *Service) SetSV2TranslatorRouter(router SV2TranslatorRouter) {
+	s.sv2Translator = router
 }
 
 // SetDeviceIdentifierResolver injects the rich-filter resolver used by the
@@ -1036,13 +1052,17 @@ func (s *Service) createMiningPoolDTO(ctx context.Context, poolID int64, priorit
 		password = string(decryptedPassBytes)
 	}
 
-	return &dto.MiningPool{
+	result := &dto.MiningPool{
 		Priority:        defaultPoolPriority + priorityIncrement,
 		URL:             pool.Url,
 		Username:        pool.Username,
 		Password:        password,
 		AppendMinerName: shouldAppendMinerNameToUsername(pool.Username),
-	}, nil
+	}
+	if err := s.routeSV2Pool(ctx, info.OrganizationID, result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // createMiningPoolDTOFromSlotConfig creates a MiningPool DTO from a PoolSlotConfig.
@@ -1063,16 +1083,47 @@ func (s *Service) createMiningPoolDTOFromSlotConfig(ctx context.Context, config 
 		if source.RawPool.Password != nil {
 			password = *source.RawPool.Password
 		}
-		return &dto.MiningPool{
+		result := &dto.MiningPool{
 			Priority:        defaultPoolPriority + priorityIncrement,
 			URL:             source.RawPool.Url,
 			Username:        source.RawPool.Username,
 			Password:        password,
 			AppendMinerName: shouldAppendMinerNameToUsername(source.RawPool.Username),
-		}, nil
+		}
+		if sv2.IsSV2URL(result.URL) {
+			info, err := session.GetInfo(ctx)
+			if err != nil {
+				return nil, fleeterror.NewInternalErrorf("error getting session info: %v", err)
+			}
+			if err := s.routeSV2Pool(ctx, info.OrganizationID, result); err != nil {
+				return nil, err
+			}
+		}
+		return result, nil
 	default:
 		return nil, fleeterror.NewInternalErrorf("invalid pool source type")
 	}
+}
+
+func (s *Service) routeSV2Pool(ctx context.Context, organizationID int64, pool *dto.MiningPool) error {
+	if pool == nil || !sv2.IsSV2URL(pool.URL) || s.sv2Translator == nil {
+		return nil
+	}
+
+	localURL, localUsername, localPassword, err := s.sv2Translator.Route(
+		ctx,
+		organizationID,
+		pool.URL,
+		pool.Username,
+	)
+	if err != nil {
+		return fleeterror.NewFailedPreconditionErrorf("start Stratum V2 translation proxy: %v", err)
+	}
+	pool.URL = localURL
+	pool.Username = localUsername
+	pool.Password = localPassword
+	pool.AppendMinerName = shouldAppendMinerNameToUsername(localUsername)
+	return nil
 }
 
 func (s *Service) createUpdateMiningPoolsPayload(ctx context.Context, defaultPool, backup1Pool, backup2Pool *pb.PoolSlotConfig) (*dto.UpdateMiningPoolsPayload, error) {

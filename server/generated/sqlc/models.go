@@ -1170,6 +1170,16 @@ type Site struct {
 	InfrastructureControlSubnets string
 }
 
+type Sv2TranslatorRoute struct {
+	ID          int64
+	OrgID       int64
+	UpstreamUrl string
+	Username    string
+	ListenPort  int32
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 type User struct {
 	ID                     int64
 	UserID                 string

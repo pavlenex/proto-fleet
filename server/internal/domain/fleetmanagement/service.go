@@ -116,6 +116,14 @@ type WorkerNamePoolReapplyService interface {
 	) (batchIdentifier string, err error)
 }
 
+type SV2TranslatorRouteResolver interface {
+	Resolve(
+		ctx context.Context,
+		organizationID int64,
+		configuredURL string,
+	) (upstreamURL string, routeUsername string, ok bool, err error)
+}
+
 type Service struct {
 	deviceStore           interfaces.DeviceStore
 	discoveredDeviceStore interfaces.DiscoveredDeviceStore
@@ -128,6 +136,7 @@ type Service struct {
 	collectionStore       interfaces.CollectionStore
 	buildingStore         interfaces.BuildingStore
 	workerNamePoolService WorkerNamePoolReapplyService
+	sv2Translator         SV2TranslatorRouteResolver
 	deviceResolver        *deviceresolver.Resolver
 	activitySvc           *activity.Service
 
@@ -187,6 +196,10 @@ func NewService(
 // on every page request. Pass nil to disable caching (tests).
 func (s *Service) WithOptionsCache(cache *fleetoptions.Cache) {
 	s.optionsCache = cache
+}
+
+func (s *Service) WithSV2TranslatorRouteResolver(resolver SV2TranslatorRouteResolver) {
+	s.sv2Translator = resolver
 }
 
 func (s *Service) logActivity(ctx context.Context, event activitymodels.Event) {
@@ -1474,10 +1487,31 @@ func (s *Service) GetMinerPoolAssignments(ctx context.Context, req *pb.GetMinerP
 
 	pools := make([]*pb.PoolAssignment, 0, len(configuredPools))
 	for _, configuredPool := range configuredPools {
+		poolURL := configuredPool.URL
+		poolUsername := configuredPool.Username
+		if s.sv2Translator != nil {
+			upstreamURL, routeUsername, ok, err := s.sv2Translator.Resolve(
+				ctx,
+				info.OrganizationID,
+				configuredPool.URL,
+			)
+			if err != nil {
+				return nil, fleeterror.NewInternalErrorf("resolve Stratum V2 translation route: %v", err)
+			}
+			if ok {
+				poolURL = upstreamURL
+				// Preserve the downstream worker suffix for display and matching.
+				// The route username remains the authoritative fallback when a
+				// miner reports a blank local username.
+				if strings.TrimSpace(poolUsername) == "" {
+					poolUsername = routeUsername
+				}
+			}
+		}
 		assignment := &pb.PoolAssignment{
-			Url:      configuredPool.URL,
-			Username: configuredPool.Username,
-			PoolId:   findMatchingFleetPoolID(configuredPool.URL, configuredPool.Username, fleetPools),
+			Url:      poolURL,
+			Username: poolUsername,
+			PoolId:   findMatchingFleetPoolID(poolURL, poolUsername, fleetPools),
 		}
 		pools = append(pools, assignment)
 	}

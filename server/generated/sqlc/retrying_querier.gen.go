@@ -2496,6 +2496,18 @@ func (q *retryingQuerier) GetOpenErrorByDedupKey(ctx context.Context, arg GetOpe
 	return result, err
 }
 
+func (q *retryingQuerier) GetOrCreateSV2TranslatorRoute(ctx context.Context, arg GetOrCreateSV2TranslatorRouteParams) (Sv2TranslatorRoute, error) {
+	var result Sv2TranslatorRoute
+	err := q.retrier.RetryQuery(ctx, "GetOrCreateSV2TranslatorRoute", func() error {
+		callResult, callErr := q.next.GetOrCreateSV2TranslatorRoute(ctx, arg)
+		if callErr == nil {
+			result = callResult
+		}
+		return callErr
+	})
+	return result, err
+}
+
 func (q *retryingQuerier) GetOrgDeviceMetricsHourlyAggregates(ctx context.Context, arg GetOrgDeviceMetricsHourlyAggregatesParams) ([]DeviceMetricsHourly, error) {
 	var result []DeviceMetricsHourly
 	err := q.retrier.RetryQuery(ctx, "GetOrgDeviceMetricsHourlyAggregates", func() error {
@@ -2788,6 +2800,18 @@ func (q *retryingQuerier) GetRunningPowerTargetScheduleOverlaps(ctx context.Cont
 	var result []GetRunningPowerTargetScheduleOverlapsRow
 	err := q.retrier.RetryQuery(ctx, "GetRunningPowerTargetScheduleOverlaps", func() error {
 		callResult, callErr := q.next.GetRunningPowerTargetScheduleOverlaps(ctx, arg)
+		if callErr == nil {
+			result = callResult
+		}
+		return callErr
+	})
+	return result, err
+}
+
+func (q *retryingQuerier) GetSV2TranslatorRouteByPort(ctx context.Context, arg GetSV2TranslatorRouteByPortParams) (Sv2TranslatorRoute, error) {
+	var result Sv2TranslatorRoute
+	err := q.retrier.RetryQuery(ctx, "GetSV2TranslatorRouteByPort", func() error {
+		callResult, callErr := q.next.GetSV2TranslatorRouteByPort(ctx, arg)
 		if callErr == nil {
 			result = callResult
 		}

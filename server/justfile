@@ -33,6 +33,10 @@ dev-system-monitoring: _build-plugins-docker
 
 # start services in docker compose
 start:
+  # Compose project names can collide across checkouts with the same directory
+  # name. Rebuild fleet-api first so startup never runs stale source while the
+  # watch process is still waiting for health.
+  docker compose build fleet-api
   docker compose up --wait
 
 # stop services in docker
