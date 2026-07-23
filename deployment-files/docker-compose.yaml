@@ -46,12 +46,29 @@ services:
     network_mode: host
     extra_hosts:
       - "timescaledb:127.0.0.1"
+    volumes:
+      - sv2-translator-data:/var/lib/proto-fleet/sv2
+      - /var/run/docker.sock:/var/run/docker.sock
     logging:
       driver: "json-file"
       options:
         max-size: "20m"
         max-file: "5"
         compress: "true"
+
+  sv2-tproxy:
+    image: stratumv2/translator_sv2:main@sha256:70f7edbce640f0e70e44757d700de72ce286da95849b1b2692d250d4d549826d
+    container_name: proto-fleet-sv2-tproxy
+    profiles: ["sv2-tproxy"]
+    environment:
+      APP: "translator_sv2 -c /etc/proto-fleet/sv2/tproxy.toml"
+    labels:
+      com.protofleet.component: "sv2-tproxy"
+      com.protofleet.image: "stratumv2/translator_sv2:main@sha256:70f7edbce640f0e70e44757d700de72ce286da95849b1b2692d250d4d549826d"
+    volumes:
+      - sv2-translator-data:/etc/proto-fleet/sv2:ro
+    restart: "no"
+    network_mode: host
 
   fleet-client:
     build:
@@ -108,6 +125,7 @@ services:
 
 volumes:
   timescaledb-data:
+  sv2-translator-data:
 
 networks:
   fleet-network:
