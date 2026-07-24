@@ -44,19 +44,42 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
+      sv2-translator-helper:
+        condition: service_healthy
     restart: always
     network_mode: host
     extra_hosts:
       - "timescaledb:127.0.0.1"
     volumes:
       - sv2-translator-data:/var/lib/proto-fleet/sv2
-      - /var/run/docker.sock:/var/run/docker.sock
+      - sv2-translator-control:/run/proto-fleet-sv2-helper:ro
     logging:
       driver: "json-file"
       options:
         max-size: "20m"
         max-file: "5"
         compress: "true"
+
+  sv2-translator-helper:
+    build:
+      context: ./server
+    command: ["/app/sv2-translator-helper"]
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/proto-fleet-sv2-helper/runtime.sock"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 1s
+    volumes:
+      - sv2-translator-control:/run/proto-fleet-sv2-helper
+      - /var/run/docker.sock:/var/run/docker.sock
 
   sv2-tproxy:
     image: stratumv2/translator_sv2:main@sha256:70f7edbce640f0e70e44757d700de72ce286da95849b1b2692d250d4d549826d
@@ -128,6 +151,7 @@ services:
 volumes:
   timescaledb-data:
   sv2-translator-data:
+  sv2-translator-control:
 
 networks:
   fleet-network:

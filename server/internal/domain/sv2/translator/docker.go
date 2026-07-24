@@ -124,6 +124,17 @@ func (r *dockerRuntime) State(ctx context.Context) (runtimeState, error) {
 }
 
 func (r *dockerRuntime) Stop(ctx context.Context) error {
+	state, err := r.State(ctx)
+	if err != nil {
+		return err
+	}
+	if !state.Exists || !state.Running {
+		return nil
+	}
+	if !state.Managed || state.Image != Image {
+		return fmt.Errorf("refusing to stop an unrecognized SV2 translator container")
+	}
+
 	query := url.Values{"t": {"10"}}
 	response, err := r.do(ctx, http.MethodPost, "/containers/"+containerName+"/stop", query)
 	if err != nil {

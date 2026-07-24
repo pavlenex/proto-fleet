@@ -51,7 +51,7 @@ func TestApplyAssignmentRequiresReleaseBeforeProfileChange(t *testing.T) {
 		ConnectHost:    "127.0.0.1",
 		DownstreamPort: uint16(port), // #nosec G115 -- ephemeral TCP ports fit in uint16.
 		ReadyTimeout:   time.Second,
-		DockerSocket:   "/var/run/docker.sock",
+		HelperSocket:   DefaultHelperSocket,
 	})
 	require.NoError(t, err)
 	runtime := &managerTestRuntime{}
@@ -168,7 +168,7 @@ func TestPersistedAssignmentResumesTranslator(t *testing.T) {
 		ConnectHost:    "127.0.0.1",
 		DownstreamPort: uint16(port), // #nosec G115 -- ephemeral TCP ports fit in uint16.
 		ReadyTimeout:   time.Second,
-		DockerSocket:   "/var/run/docker.sock",
+		HelperSocket:   DefaultHelperSocket,
 	}
 	profile := Profile{Upstreams: []Upstream{{URL: managerTestURL, Username: "account"}}}
 	manager, err := NewManager(config)

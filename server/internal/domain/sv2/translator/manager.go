@@ -30,7 +30,7 @@ type Config struct {
 	ConnectHost    string        `help:"Listener host Fleet probes for readiness; empty uses the advertised host" default:"" env:"CONNECT_HOST"`
 	DownstreamPort uint16        `help:"SV1 listener port exposed by the translator" default:"34255" env:"DOWNSTREAM_PORT"`
 	ReadyTimeout   time.Duration `help:"Maximum time to start the pre-created translator and verify its listener" default:"30s" env:"READY_TIMEOUT"`
-	DockerSocket   string        `help:"Docker Engine socket used only to inspect/start/stop the fixed translator container" default:"/var/run/docker.sock" env:"DOCKER_SOCKET"`
+	HelperSocket   string        `help:"Unix socket for the isolated SV2 translator lifecycle helper" default:"/run/proto-fleet-sv2-helper/runtime.sock" env:"HELPER_SOCKET"`
 }
 
 type Assignment struct {
@@ -123,8 +123,8 @@ func NewManager(config Config) (*FileManager, error) {
 	if config.ReadyTimeout <= 0 {
 		return nil, fmt.Errorf("SV2 translator ready timeout must be positive")
 	}
-	if !filepath.IsAbs(config.DockerSocket) {
-		return nil, fmt.Errorf("SV2 translator Docker socket must be absolute")
+	if !filepath.IsAbs(config.HelperSocket) {
+		return nil, fmt.Errorf("SV2 translator helper socket must be absolute")
 	}
 	if config.AdvertisedHost != "" {
 		if _, err := normalizeAdvertisedHost(config.AdvertisedHost); err != nil {
@@ -140,7 +140,7 @@ func NewManager(config Config) (*FileManager, error) {
 
 	manager := &FileManager{
 		config:  config,
-		runtime: newDockerRuntime(config.DockerSocket),
+		runtime: newHelperRuntime(config.HelperSocket),
 		devices: make(map[string]struct{}),
 	}
 	if err := manager.loadActiveProfile(); err != nil {
