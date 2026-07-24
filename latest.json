@@ -1,0 +1,10 @@
+{
+  "version": "nightly-20260724-eaaec6d1026d",
+  "tag": "nightly-20260724-eaaec6d1026d",
+  "commit": "eaaec6d1026d77e0cb92ae360e31f46758c3e634",
+  "build_date": "2026-07-24T06:23:14Z",
+  "run_id": "30072109592",
+  "run_number": "1",
+  "run_attempt": "1",
+  "release_url": "https://github.com/pavlenex/proto-fleet/releases/tag/nightly-20260724-eaaec6d1026d"
+}
