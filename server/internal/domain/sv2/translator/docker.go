@@ -27,9 +27,9 @@ type runtimeState struct {
 }
 
 type containerRuntime interface {
-	EnsureStarted(context.Context) error
-	State(context.Context) (runtimeState, error)
-	Stop(context.Context) error
+	EnsureStarted(ctx context.Context) error
+	State(ctx context.Context) (runtimeState, error)
+	Stop(ctx context.Context) error
 }
 
 type dockerRuntime struct {

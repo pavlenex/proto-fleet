@@ -23,7 +23,14 @@ func (s *Service) prepareUpdateMiningPoolsDispatch(
 	payload *dto.UpdateMiningPoolsPayload,
 ) ([]queue.EnqueueMessage, error) {
 	slots, sourcePools := poolSlotsFromPayload(payload)
+	selectedIdentifiers := make([]string, 0, len(devices))
+	for _, device := range devices {
+		selectedIdentifiers = append(selectedIdentifiers, device.identifier)
+	}
 	if !containsSV2(slots) {
+		if err := s.releaseTranslatedDevices(ctx, selectedIdentifiers); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	if s.pluginCaps == nil {
@@ -77,12 +84,31 @@ func (s *Service) prepareUpdateMiningPoolsDispatch(
 		return nil, fleeterror.NewInvalidArgumentErrorf("plan Stratum V2 pool assignment: %v", err)
 	}
 	if !plan.TranslationRequired() {
+		if err := s.releaseTranslatedDevices(ctx, selectedIdentifiers); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	if s.translatorManager == nil {
 		return nil, fleeterror.NewInternalError("SV2 translator manager is not configured")
 	}
-	endpoint, err := s.translatorManager.EnsureProfile(ctx, plan.TranslatorProfile)
+	translatedIdentifiers := make([]string, 0, len(plan.Devices))
+	for _, route := range plan.Devices {
+		for _, slot := range route.Slots {
+			if slot.UsesTranslation {
+				translatedIdentifiers = append(translatedIdentifiers, route.DeviceIdentifier)
+				break
+			}
+		}
+	}
+	endpoint, err := s.translatorManager.ApplyAssignment(
+		ctx,
+		&plan.TranslatorProfile,
+		translator.Assignment{
+			SelectedDeviceIdentifiers:   selectedIdentifiers,
+			TranslatedDeviceIdentifiers: translatedIdentifiers,
+		},
+	)
 	if err != nil {
 		return nil, fleeterror.NewFailedPreconditionErrorf("start Stratum V2 translator: %v", err)
 	}
@@ -104,6 +130,20 @@ func (s *Service) prepareUpdateMiningPoolsDispatch(
 		messages = append(messages, queue.EnqueueMessage{DeviceID: device.id, Payload: devicePayload})
 	}
 	return messages, nil
+}
+
+func (s *Service) releaseTranslatedDevices(ctx context.Context, selectedIdentifiers []string) error {
+	if s.translatorManager == nil {
+		return nil
+	}
+	if _, err := s.translatorManager.ApplyAssignment(
+		ctx,
+		nil,
+		translator.Assignment{SelectedDeviceIdentifiers: selectedIdentifiers},
+	); err != nil {
+		return fleeterror.NewFailedPreconditionErrorf("update Stratum V2 translator assignments: %v", err)
+	}
+	return nil
 }
 
 func (s *Service) resolvePoolCapabilityDevices(

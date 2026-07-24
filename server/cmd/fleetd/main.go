@@ -497,10 +497,8 @@ func start(config *Config) error {
 	if err != nil {
 		return fmt.Errorf("initialize SV2 translator: %w", err)
 	}
-	if activeProfile, _, active := translatorManager.ActiveProfile(); active {
-		if _, err := translatorManager.EnsureProfile(context.Background(), activeProfile); err != nil {
-			return fmt.Errorf("resume SV2 translator: %w", err)
-		}
+	if err := translatorManager.Resume(context.Background()); err != nil {
+		return fmt.Errorf("resume SV2 translator: %w", err)
 	}
 	commandSvc := commandDomain.NewService(&config.Command, conn, executionService, dbMessageQueue, statusService, encryptSvc, filesService, deviceStore, userStore, authSvc, telemetryService, pluginService, activitySvc)
 	commandSvc.SetPluginCapabilitiesProvider(pluginService)

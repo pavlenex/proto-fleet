@@ -18,31 +18,36 @@ const managerTestURL = "stratum2+tcp://pool.example.com:34254/9bXiEd8boQVhq7WddE
 type managerTestRuntime struct {
 	startCalls int
 	stopCalls  int
+	running    bool
 }
 
 func (f *managerTestRuntime) EnsureStarted(context.Context) error {
 	f.startCalls++
+	f.running = true
 	return nil
 }
 
 func (f *managerTestRuntime) State(context.Context) (runtimeState, error) {
-	return runtimeState{Exists: true, Running: true, Managed: true, Image: Image}, nil
+	return runtimeState{Exists: true, Running: f.running, Managed: true, Image: Image}, nil
 }
 
 func (f *managerTestRuntime) Stop(context.Context) error {
 	f.stopCalls++
+	f.running = false
 	return nil
 }
 
-func TestEnsureProfilePersistsAndStartsFixedProfile(t *testing.T) {
+func TestApplyAssignmentTracksDevicesAndAllowsSafeProfileChange(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
-	port := listener.Addr().(*net.TCPAddr).Port
+	listenerAddress, ok := listener.Addr().(*net.TCPAddr)
+	require.True(t, ok)
+	port := listenerAddress.Port
 
 	manager, err := NewManager(Config{
 		StateDir:       t.TempDir(),
-		AdvertisedHost: "10.0.0.5",
+		AdvertisedHost: "sv2-tproxy",
 		ConnectHost:    "127.0.0.1",
 		DownstreamPort: uint16(port), // #nosec G115 -- ephemeral TCP ports fit in uint16.
 		ReadyTimeout:   time.Second,
@@ -53,25 +58,118 @@ func TestEnsureProfilePersistsAndStartsFixedProfile(t *testing.T) {
 	manager.runtime = runtime
 	profile := Profile{Upstreams: []Upstream{{URL: managerTestURL, Username: "account"}}}
 
-	endpoint, err := manager.EnsureProfile(context.Background(), profile)
+	endpoint, err := manager.ApplyAssignment(
+		context.Background(),
+		&profile,
+		Assignment{
+			SelectedDeviceIdentifiers:   []string{"miner-b", "miner-a"},
+			TranslatedDeviceIdentifiers: []string{"miner-b", "miner-a"},
+		},
+	)
 
 	require.NoError(t, err)
-	assert.Equal(t, "stratum+tcp://10.0.0.5:"+strconv.Itoa(port), endpoint.String())
+	assert.Equal(t, "stratum+tcp://sv2-tproxy:"+strconv.Itoa(port), endpoint.String())
 	assert.Equal(t, 1, runtime.startCalls)
 	_, err = os.Stat(filepath.Join(manager.config.StateDir, configFileName))
 	require.NoError(t, err)
 	_, err = os.Stat(filepath.Join(manager.config.StateDir, profileFileName))
 	require.NoError(t, err)
 
-	_, err = manager.EnsureProfile(context.Background(), Profile{
+	otherProfile := Profile{
 		Upstreams: []Upstream{{
 			URL:      "stratum2+tcp://other.example.com:34254/9bXiEd8boQVhq7WddEcERUL5tyyJVFYdU8th3HfbNXK3Yw6GRXh",
 			Username: "other",
 		}},
-	})
+	}
+	_, err = manager.ApplyAssignment(
+		context.Background(),
+		&otherProfile,
+		Assignment{
+			SelectedDeviceIdentifiers:   []string{"miner-a"},
+			TranslatedDeviceIdentifiers: []string{"miner-a"},
+		},
+	)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "different pool set")
+	assert.Contains(t, err.Error(), "1 unselected miner")
 	assert.Equal(t, 1, runtime.startCalls)
+	assert.Equal(t, 0, runtime.stopCalls)
+
+	_, err = manager.ApplyAssignment(
+		context.Background(),
+		nil,
+		Assignment{SelectedDeviceIdentifiers: []string{"miner-b"}},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 0, runtime.stopCalls)
+
+	_, err = manager.ApplyAssignment(
+		context.Background(),
+		&otherProfile,
+		Assignment{
+			SelectedDeviceIdentifiers:   []string{"miner-a"},
+			TranslatedDeviceIdentifiers: []string{"miner-a"},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, runtime.startCalls)
+	assert.Equal(t, 1, runtime.stopCalls)
+
+	_, err = manager.ApplyAssignment(
+		context.Background(),
+		nil,
+		Assignment{SelectedDeviceIdentifiers: []string{"miner-a"}},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, runtime.stopCalls)
+	_, err = os.Stat(filepath.Join(manager.config.StateDir, configFileName))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Stat(filepath.Join(manager.config.StateDir, profileFileName))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	_, _, active := manager.ActiveProfile()
+	assert.False(t, active)
+}
+
+func TestPersistedAssignmentResumesTranslator(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	listenerAddress, ok := listener.Addr().(*net.TCPAddr)
+	require.True(t, ok)
+	port := listenerAddress.Port
+	stateDir := t.TempDir()
+	config := Config{
+		StateDir:       stateDir,
+		AdvertisedHost: "10.0.0.5",
+		ConnectHost:    "127.0.0.1",
+		DownstreamPort: uint16(port), // #nosec G115 -- ephemeral TCP ports fit in uint16.
+		ReadyTimeout:   time.Second,
+		DockerSocket:   "/var/run/docker.sock",
+	}
+	profile := Profile{Upstreams: []Upstream{{URL: managerTestURL, Username: "account"}}}
+	manager, err := NewManager(config)
+	require.NoError(t, err)
+	manager.runtime = &managerTestRuntime{}
+	_, err = manager.ApplyAssignment(
+		context.Background(),
+		&profile,
+		Assignment{
+			SelectedDeviceIdentifiers:   []string{"miner-a"},
+			TranslatedDeviceIdentifiers: []string{"miner-a"},
+		},
+	)
+	require.NoError(t, err)
+
+	restarted, err := NewManager(config)
+	require.NoError(t, err)
+	runtime := &managerTestRuntime{}
+	restarted.runtime = runtime
+
+	require.NoError(t, restarted.Resume(context.Background()))
+	assert.Equal(t, 1, runtime.startCalls)
+	activeProfile, activeEndpoint, active := restarted.ActiveProfile()
+	require.True(t, active)
+	assert.True(t, ProfilesEqual(profile, activeProfile))
+	assert.Equal(t, "stratum+tcp://10.0.0.5:"+strconv.Itoa(port), activeEndpoint.String())
 }
 
 func TestRenderConfigUsesCanonicalAuthorityKeyAndPerUpstreamIdentity(t *testing.T) {

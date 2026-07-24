@@ -67,7 +67,7 @@ services:
       com.protofleet.image: "stratumv2/translator_sv2:main@sha256:70f7edbce640f0e70e44757d700de72ce286da95849b1b2692d250d4d549826d"
     volumes:
       - sv2-translator-data:/etc/proto-fleet/sv2:ro
-    restart: "no"
+    restart: unless-stopped
     network_mode: host
 
   fleet-client:

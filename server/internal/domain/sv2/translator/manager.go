@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,27 +21,34 @@ import (
 const (
 	configFileName  = "tproxy.toml"
 	profileFileName = "active-profile.json"
-	profileVersion  = 1
+	profileVersion  = 2
 )
 
 type Config struct {
 	StateDir       string        `help:"Directory shared with the pre-created SV2 translator container" default:"/var/lib/proto-fleet/sv2" env:"STATE_DIR"`
-	AdvertisedHost string        `help:"Private listener IP sent to SV1 miners; empty selects the route to the assigned SV2 pool" default:"" env:"ADVERTISED_HOST"`
+	AdvertisedHost string        `help:"Listener IP or hostname sent to SV1 miners; empty selects the route to the assigned SV2 pool" default:"" env:"ADVERTISED_HOST"`
 	ConnectHost    string        `help:"Listener host Fleet probes for readiness; empty uses the advertised host" default:"" env:"CONNECT_HOST"`
 	DownstreamPort uint16        `help:"SV1 listener port exposed by the translator" default:"34255" env:"DOWNSTREAM_PORT"`
 	ReadyTimeout   time.Duration `help:"Maximum time to start the pre-created translator and verify its listener" default:"30s" env:"READY_TIMEOUT"`
 	DockerSocket   string        `help:"Docker Engine socket used only to inspect/start/stop the fixed translator container" default:"/var/run/docker.sock" env:"DOCKER_SOCKET"`
 }
 
+type Assignment struct {
+	SelectedDeviceIdentifiers   []string
+	TranslatedDeviceIdentifiers []string
+}
+
 type Manager interface {
-	EnsureProfile(context.Context, Profile) (Endpoint, error)
+	ApplyAssignment(ctx context.Context, desired *Profile, assignment Assignment) (Endpoint, error)
+	Resume(ctx context.Context) error
 	ActiveProfile() (Profile, Endpoint, bool)
 }
 
 type persistedProfile struct {
-	Version  int      `json:"version"`
-	Profile  Profile  `json:"profile"`
-	Endpoint Endpoint `json:"endpoint"`
+	Version           int      `json:"version"`
+	Profile           Profile  `json:"profile"`
+	Endpoint          Endpoint `json:"endpoint"`
+	DeviceIdentifiers []string `json:"device_identifiers"`
 }
 
 type FileManager struct {
@@ -51,6 +59,14 @@ type FileManager struct {
 	active   bool
 	profile  Profile
 	endpoint Endpoint
+	devices  map[string]struct{}
+}
+
+type managerSnapshot struct {
+	active   bool
+	profile  Profile
+	endpoint Endpoint
+	devices  map[string]struct{}
 }
 
 var _ Manager = (*FileManager)(nil)
@@ -69,7 +85,7 @@ func NewManager(config Config) (*FileManager, error) {
 		return nil, fmt.Errorf("SV2 translator Docker socket must be absolute")
 	}
 	if config.AdvertisedHost != "" {
-		if _, err := privateIP("advertised", config.AdvertisedHost, false); err != nil {
+		if _, err := normalizeAdvertisedHost(config.AdvertisedHost); err != nil {
 			return nil, err
 		}
 	}
@@ -83,6 +99,7 @@ func NewManager(config Config) (*FileManager, error) {
 	manager := &FileManager{
 		config:  config,
 		runtime: newDockerRuntime(config.DockerSocket),
+		devices: make(map[string]struct{}),
 	}
 	if err := manager.loadActiveProfile(); err != nil {
 		return nil, err
@@ -90,77 +107,99 @@ func NewManager(config Config) (*FileManager, error) {
 	return manager, nil
 }
 
-func (m *FileManager) EnsureProfile(ctx context.Context, desired Profile) (Endpoint, error) {
-	normalized, err := NormalizeProfile(desired)
+func (m *FileManager) ApplyAssignment(
+	ctx context.Context,
+	desired *Profile,
+	assignment Assignment,
+) (Endpoint, error) {
+	selected, err := normalizeDeviceIdentifiers("selected", assignment.SelectedDeviceIdentifiers)
 	if err != nil {
 		return "", err
+	}
+	translated, err := normalizeDeviceIdentifiers("translated", assignment.TranslatedDeviceIdentifiers)
+	if err != nil {
+		return "", err
+	}
+	selectedSet := deviceSet(selected)
+	for _, identifier := range translated {
+		if _, ok := selectedSet[identifier]; !ok {
+			return "", fmt.Errorf("translated miner %q is not part of the selected assignment", identifier)
+		}
+	}
+
+	var normalized Profile
+	if len(translated) > 0 {
+		if desired == nil {
+			return "", fmt.Errorf("translator profile is required for translated miners")
+		}
+		normalized, err = NormalizeProfile(*desired)
+		if err != nil {
+			return "", err
+		}
+	} else if desired != nil {
+		return "", fmt.Errorf("translator profile requires at least one translated miner")
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	firstActivation := !m.active
-	if m.active && !ProfilesEqual(m.profile, normalized) {
+	remaining := cloneDeviceSet(m.devices)
+	for _, identifier := range selected {
+		delete(remaining, identifier)
+	}
+	if len(translated) == 0 {
+		return m.releaseSelectedLocked(remaining)
+	}
+	if m.active && !ProfilesEqual(m.profile, normalized) && len(remaining) > 0 {
 		return "", fmt.Errorf(
-			"SV2 translation already serves a different pool set; reassign existing translated miners before changing it",
+			"SV2 translation still serves %d unselected miner(s); reassign them before changing the pool set",
+			len(remaining),
 		)
 	}
 
-	endpoint := m.endpoint
-	if firstActivation {
-		endpoint, err = m.endpointForProfile(ctx, normalized)
-		if err != nil {
+	nextDevices := remaining
+	for _, identifier := range translated {
+		nextDevices[identifier] = struct{}{}
+	}
+	if m.active && ProfilesEqual(m.profile, normalized) {
+		if err := m.startAndWaitLocked(ctx, m.endpoint); err != nil {
+			return "", err
+		}
+		if err := m.persistActiveProfile(m.profile, m.endpoint, nextDevices); err != nil {
+			return "", err
+		}
+		m.devices = nextDevices
+		return m.endpoint, nil
+	}
+
+	previous := m.snapshotLocked()
+	if previous.active {
+		if err := m.stopLocked(); err != nil {
 			return "", err
 		}
 	}
-
-	rendered, err := renderConfig(normalized, m.config.DownstreamPort)
+	endpoint, err := m.endpointForProfile(ctx, normalized)
 	if err != nil {
+		_ = m.restoreLocked(previous)
 		return "", err
 	}
-	if err := os.MkdirAll(m.config.StateDir, 0o700); err != nil {
-		return "", fmt.Errorf("create SV2 translator state directory: %w", err)
-	}
-	if err := atomicWrite(m.configPath(), rendered, 0o600); err != nil {
-		return "", err
-	}
-	if firstActivation {
-		record, marshalErr := json.Marshal(persistedProfile{
-			Version:  profileVersion,
-			Profile:  normalized,
-			Endpoint: endpoint,
-		})
-		if marshalErr != nil {
-			_ = os.Remove(m.configPath())
-			return "", fmt.Errorf("encode SV2 translator profile: %w", marshalErr)
-		}
-		if err := atomicWrite(m.profilePath(), record, 0o600); err != nil {
-			_ = os.Remove(m.configPath())
-			return "", err
-		}
-	}
-
-	startupCtx, cancel := context.WithTimeout(ctx, m.config.ReadyTimeout)
-	defer cancel()
-	if err := m.runtime.EnsureStarted(startupCtx); err != nil {
-		if firstActivation {
-			m.rollbackFirstActivation()
+	if err := m.activateLocked(ctx, normalized, endpoint, nextDevices); err != nil {
+		restoreErr := m.restoreLocked(previous)
+		if restoreErr != nil {
+			return "", fmt.Errorf("%v; restore previous SV2 translator profile: %w", err, restoreErr)
 		}
 		return "", err
-	}
-	if err := m.waitReady(startupCtx, endpoint); err != nil {
-		if firstActivation {
-			m.rollbackFirstActivation()
-		}
-		return "", err
-	}
-
-	if firstActivation {
-		m.active = true
-		m.profile = cloneProfile(normalized)
-		m.endpoint = endpoint
 	}
 	return endpoint, nil
+}
+
+func (m *FileManager) Resume(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.active {
+		return nil
+	}
+	return m.startAndWaitLocked(ctx, m.endpoint)
 }
 
 func (m *FileManager) ActiveProfile() (Profile, Endpoint, bool) {
@@ -201,10 +240,21 @@ func (m *FileManager) loadActiveProfile() error {
 	if err := validateEndpoint(persisted.Endpoint, m.config.DownstreamPort); err != nil {
 		return fmt.Errorf("validate persisted SV2 translator endpoint: %w", err)
 	}
+	deviceIdentifiers, err := normalizeDeviceIdentifiers("persisted", persisted.DeviceIdentifiers)
+	if err != nil {
+		return fmt.Errorf("validate persisted SV2 translator devices: %w", err)
+	}
+	if len(deviceIdentifiers) == 0 {
+		return fmt.Errorf("persisted SV2 translator profile has no translated miners")
+	}
+	if !equalStrings(deviceIdentifiers, persisted.DeviceIdentifiers) {
+		return fmt.Errorf("persisted SV2 translator devices are not normalized")
+	}
 
 	m.active = true
 	m.profile = cloneProfile(normalized)
 	m.endpoint = persisted.Endpoint
+	m.devices = deviceSet(deviceIdentifiers)
 	return nil
 }
 
@@ -217,11 +267,11 @@ func (m *FileManager) endpointForProfile(ctx context.Context, profile Profile) (
 		}
 		host = selected.String()
 	}
-	ip, err := privateIP("advertised", host, false)
+	host, err := normalizeAdvertisedHost(host)
 	if err != nil {
 		return "", err
 	}
-	return Endpoint("stratum+tcp://" + net.JoinHostPort(ip.String(), strconv.Itoa(int(m.config.DownstreamPort)))), nil
+	return Endpoint("stratum+tcp://" + net.JoinHostPort(host, strconv.Itoa(int(m.config.DownstreamPort)))), nil
 }
 
 func (m *FileManager) waitReady(ctx context.Context, endpoint Endpoint) error {
@@ -256,12 +306,130 @@ func (m *FileManager) waitReady(ctx context.Context, endpoint Endpoint) error {
 	}
 }
 
-func (m *FileManager) rollbackFirstActivation() {
+func (m *FileManager) releaseSelectedLocked(remaining map[string]struct{}) (Endpoint, error) {
+	if !m.active {
+		return "", nil
+	}
+	if len(remaining) > 0 {
+		if equalDeviceSets(remaining, m.devices) {
+			return m.endpoint, nil
+		}
+		if err := m.persistActiveProfile(m.profile, m.endpoint, remaining); err != nil {
+			return "", err
+		}
+		m.devices = remaining
+		return m.endpoint, nil
+	}
+	if err := m.stopLocked(); err != nil {
+		return "", err
+	}
+	profileErr := removeIfExists(m.profilePath())
+	configErr := removeIfExists(m.configPath())
+	m.active = false
+	m.profile = Profile{}
+	m.endpoint = ""
+	m.devices = make(map[string]struct{})
+	if profileErr != nil {
+		return "", profileErr
+	}
+	if configErr != nil {
+		return "", configErr
+	}
+	return "", nil
+}
+
+func (m *FileManager) activateLocked(
+	ctx context.Context,
+	profile Profile,
+	endpoint Endpoint,
+	devices map[string]struct{},
+) error {
+	rendered, err := renderConfig(profile, m.config.DownstreamPort)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(m.config.StateDir, 0o700); err != nil {
+		return fmt.Errorf("create SV2 translator state directory: %w", err)
+	}
+	if err := atomicWrite(m.configPath(), rendered, 0o600); err != nil {
+		return err
+	}
+	if err := m.persistActiveProfile(profile, endpoint, devices); err != nil {
+		_ = os.Remove(m.configPath())
+		return err
+	}
+	if err := m.startAndWaitLocked(ctx, endpoint); err != nil {
+		return err
+	}
+	m.active = true
+	m.profile = cloneProfile(profile)
+	m.endpoint = endpoint
+	m.devices = cloneDeviceSet(devices)
+	return nil
+}
+
+func (m *FileManager) persistActiveProfile(
+	profile Profile,
+	endpoint Endpoint,
+	devices map[string]struct{},
+) error {
+	record, err := json.Marshal(persistedProfile{
+		Version:           profileVersion,
+		Profile:           profile,
+		Endpoint:          endpoint,
+		DeviceIdentifiers: sortedDeviceIdentifiers(devices),
+	})
+	if err != nil {
+		return fmt.Errorf("encode SV2 translator profile: %w", err)
+	}
+	return atomicWrite(m.profilePath(), record, 0o600)
+}
+
+func (m *FileManager) startAndWaitLocked(ctx context.Context, endpoint Endpoint) error {
+	startupCtx, cancel := context.WithTimeout(ctx, m.config.ReadyTimeout)
+	defer cancel()
+	if err := m.runtime.EnsureStarted(startupCtx); err != nil {
+		return err
+	}
+	return m.waitReady(startupCtx, endpoint)
+}
+
+func (m *FileManager) stopLocked() error {
 	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = m.runtime.Stop(stopCtx)
-	_ = os.Remove(m.profilePath())
-	_ = os.Remove(m.configPath())
+	return m.runtime.Stop(stopCtx)
+}
+
+func (m *FileManager) snapshotLocked() managerSnapshot {
+	return managerSnapshot{
+		active:   m.active,
+		profile:  cloneProfile(m.profile),
+		endpoint: m.endpoint,
+		devices:  cloneDeviceSet(m.devices),
+	}
+}
+
+func (m *FileManager) restoreLocked(previous managerSnapshot) error {
+	if err := m.stopLocked(); err != nil {
+		return err
+	}
+	if !previous.active {
+		_ = removeIfExists(m.profilePath())
+		_ = removeIfExists(m.configPath())
+		m.active = false
+		m.profile = Profile{}
+		m.endpoint = ""
+		m.devices = make(map[string]struct{})
+		return nil
+	}
+	restoreCtx, cancel := context.WithTimeout(context.Background(), m.config.ReadyTimeout)
+	defer cancel()
+	return m.activateLocked(
+		restoreCtx,
+		previous.profile,
+		previous.endpoint,
+		previous.devices,
+	)
 }
 
 func (m *FileManager) configPath() string {
@@ -287,9 +455,18 @@ func renderConfig(profile Profile, downstreamPort uint16) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("normalize SV2 authority key: %w", err)
 		}
-		addressJSON, _ := json.Marshal(parsed.Hostname())
-		authorityJSON, _ := json.Marshal(authority)
-		usernameJSON, _ := json.Marshal(upstream.Username)
+		addressJSON, err := json.Marshal(parsed.Hostname())
+		if err != nil {
+			return nil, fmt.Errorf("encode SV2 translator upstream address: %w", err)
+		}
+		authorityJSON, err := json.Marshal(authority)
+		if err != nil {
+			return nil, fmt.Errorf("encode SV2 translator authority key: %w", err)
+		}
+		usernameJSON, err := json.Marshal(upstream.Username)
+		if err != nil {
+			return nil, fmt.Errorf("encode SV2 translator username: %w", err)
+		}
 		fmt.Fprintf(&upstreams, `
 [[upstreams]]
 address = %s
@@ -345,15 +522,63 @@ func privateIP(label, raw string, allowLoopback bool) (net.IP, error) {
 	return ip, nil
 }
 
+func normalizeAdvertisedHost(raw string) (string, error) {
+	host := strings.Trim(strings.TrimSpace(raw), "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		validated, err := privateIP("advertised", host, false)
+		if err != nil {
+			return "", err
+		}
+		return validated.String(), nil
+	}
+	host = strings.ToLower(host)
+	if !validHostname(host) {
+		return "", fmt.Errorf(
+			"SV2 translator advertised host %q must be a private IP or valid hostname",
+			raw,
+		)
+	}
+	return host, nil
+}
+
+func validHostname(host string) bool {
+	if host == "" || len(host) > 253 || strings.HasSuffix(host, ".") {
+		return false
+	}
+	allNumeric := true
+	for _, char := range host {
+		if (char < '0' || char > '9') && char != '.' {
+			allNumeric = false
+			break
+		}
+	}
+	if allNumeric {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, char := range label {
+			if (char < 'a' || char > 'z') &&
+				(char < '0' || char > '9') &&
+				char != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func validateEndpoint(endpoint Endpoint, expectedPort uint16) error {
 	parsed, err := url.Parse(endpoint.String())
 	if err != nil {
-		return err
+		return fmt.Errorf("parse persisted SV2 translator endpoint: %w", err)
 	}
 	if parsed.Scheme != "stratum+tcp" {
 		return fmt.Errorf("unexpected scheme %q", parsed.Scheme)
 	}
-	if _, err := privateIP("persisted endpoint", parsed.Hostname(), false); err != nil {
+	if _, err := normalizeAdvertisedHost(parsed.Hostname()); err != nil {
 		return err
 	}
 	if parsed.Port() != strconv.Itoa(int(expectedPort)) {
@@ -393,4 +618,82 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 
 func cloneProfile(profile Profile) Profile {
 	return Profile{Upstreams: append([]Upstream(nil), profile.Upstreams...)}
+}
+
+func normalizeDeviceIdentifiers(label string, identifiers []string) ([]string, error) {
+	normalized := make([]string, 0, len(identifiers))
+	seen := make(map[string]struct{}, len(identifiers))
+	for _, raw := range identifiers {
+		identifier := strings.TrimSpace(raw)
+		if identifier == "" {
+			return nil, fmt.Errorf("%s miner identifier must not be empty", label)
+		}
+		if _, ok := seen[identifier]; ok {
+			continue
+		}
+		seen[identifier] = struct{}{}
+		normalized = append(normalized, identifier)
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+func deviceSet(identifiers []string) map[string]struct{} {
+	devices := make(map[string]struct{}, len(identifiers))
+	for _, identifier := range identifiers {
+		devices[identifier] = struct{}{}
+	}
+	return devices
+}
+
+func cloneDeviceSet(devices map[string]struct{}) map[string]struct{} {
+	cloned := make(map[string]struct{}, len(devices))
+	for identifier := range devices {
+		cloned[identifier] = struct{}{}
+	}
+	return cloned
+}
+
+func sortedDeviceIdentifiers(devices map[string]struct{}) []string {
+	identifiers := make([]string, 0, len(devices))
+	for identifier := range devices {
+		identifiers = append(identifiers, identifier)
+	}
+	sort.Strings(identifiers)
+	return identifiers
+}
+
+func equalDeviceSets(left, right map[string]struct{}) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for identifier := range left {
+		if _, ok := right[identifier]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func removeIfExists(path string) error {
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("remove SV2 translator state %s: %w", filepath.Base(path), err)
+	}
+	return nil
 }

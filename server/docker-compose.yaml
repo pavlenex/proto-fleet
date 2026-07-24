@@ -43,6 +43,9 @@ services:
       PLUGINS_DIR: "/app/plugins"
       PLUGINS_ENABLED: "true"
       PROTO_MINER_PORT: "8080"
+      # Containers on fleet-network can reach the translator by service name.
+      # Override with a LAN IP/hostname when testing physical miners.
+      SV2_TRANSLATOR_ADVERTISED_HOST: "${SV2_TRANSLATOR_ADVERTISED_HOST:-sv2-tproxy}"
       SV2_TRANSLATOR_CONNECT_HOST: "sv2-tproxy"
     depends_on:
       timescaledb:
@@ -70,7 +73,7 @@ services:
       - "34255:34255"
     volumes:
       - sv2-translator-data:/etc/proto-fleet/sv2:ro
-    restart: "no"
+    restart: unless-stopped
     networks:
       - fleet-network
 
